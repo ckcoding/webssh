@@ -1,0 +1,19 @@
+# Build artifacts
+result/
+web/dist/
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node
+web/node_modules/
+
+# Go
+vendor/

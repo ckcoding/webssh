@@ -1,0 +1,18 @@
+services:
+  webssh:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: webssh
+    restart: unless-stopped
+    ports:
+      - "5032:5032"
+    environment:
+      TZ: Asia/Shanghai
+      savePass: "true"
+      authInfo: admin:123456
+    volumes:
+      - webssh-data:/home/webssh/.config/webssh
+
+volumes:
+  webssh-data:

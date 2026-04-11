@@ -1,0 +1,15 @@
+# Ignore node_modules
+node_modules/
+web/node_modules/
+
+# Ignore local builds
+dist/
+web/dist/
+result/
+*.log
+
+# Ignore OS junk
+.DS_Store
+
+# Ignore git
+.git/
