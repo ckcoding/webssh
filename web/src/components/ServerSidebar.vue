@@ -103,8 +103,8 @@
                     <div class="status-expire">
                         {{ $t('ExpiresAt') }}: <span>{{ formatExpiresAtLabel(currentConnectionInfo.expiresAt) }}</span>
                     </div>
-                    <div v-if="isValidTimestamp(systemInfo.updatedAt)" class="status-time">
-                        {{ formatUpdatedAt(systemInfo.updatedAt) }}
+                    <div class="status-time">
+                        {{ browserTimeText }}
                     </div>
                 </div>
             </div>
@@ -117,6 +117,12 @@ import { mapState } from 'vuex'
 
 export default {
     name: 'ServerSidebar',
+    data() {
+        return {
+            browserNow: new Date(),
+            browserClockTimer: null
+        }
+    },
     computed: {
         ...mapState(['sshInfo', 'systemInfo', 'termList', 'currentTab']),
         hasActiveTerminal() {
@@ -127,10 +133,10 @@ export default {
             const current = this.sshInfo || {}
             return {
                 host: current.host || '',
-                ip: this.trimOrEmpty(live.ip) || this.resolveDisplayIP(current),
-                countryFlag: this.trimOrEmpty(live.countryFlag) || this.trimOrEmpty(current.countryFlag),
-                location: this.trimOrEmpty(live.location) || this.trimOrEmpty(current.location),
-                os: this.trimOrEmpty(live.os) || this.trimOrEmpty(current.os),
+                ip: this.trimOrEmpty(current.ip) || this.trimOrEmpty(live.ip) || this.resolveDisplayIP(current),
+                countryFlag: this.trimOrEmpty(current.countryFlag) || this.trimOrEmpty(live.countryFlag),
+                location: this.trimOrEmpty(current.location) || this.trimOrEmpty(live.location),
+                os: this.trimOrEmpty(current.os) || this.trimOrEmpty(live.os),
                 expiresAt: this.trimOrEmpty(current.expiresAt),
                 username: current.username || 'root',
                 port: Number(current.port) || 22,
@@ -212,9 +218,31 @@ export default {
                 Number(this.systemInfo.cpuCores) > 0 ||
                 Number(this.systemInfo.memoryTotalMB) > 0 ||
                 Number(this.systemInfo.diskTotalMB) > 0
+        },
+        browserTimeText() {
+            return this.formatBrowserTime(this.browserNow)
         }
     },
+    mounted() {
+        this.startBrowserClock()
+    },
+    beforeDestroy() {
+        this.stopBrowserClock()
+    },
     methods: {
+        startBrowserClock() {
+            this.stopBrowserClock()
+            this.browserNow = new Date()
+            this.browserClockTimer = window.setInterval(() => {
+                this.browserNow = new Date()
+            }, 1000)
+        },
+        stopBrowserClock() {
+            if (this.browserClockTimer !== null) {
+                window.clearInterval(this.browserClockTimer)
+                this.browserClockTimer = null
+            }
+        },
         trimOrEmpty(value) {
             if (value === undefined || value === null) {
                 return ''
@@ -287,6 +315,15 @@ export default {
         },
         authModeLabel(info = {}) {
             return this.$t(Number(info.logintype) === 1 ? 'privateKey' : 'password')
+        },
+        formatBrowserTime(value) {
+            const date = value instanceof Date ? value : new Date(value)
+            if (Number.isNaN(date.getTime())) {
+                return ''
+            }
+            return date.toLocaleString(this.$i18n.locale === 'zh' ? 'zh-CN' : 'en-US', {
+                hour12: false
+            })
         },
         formatUpdatedAt(value) {
             const normalized = this.trimOrEmpty(value)

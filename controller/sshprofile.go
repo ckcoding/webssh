@@ -41,6 +41,19 @@ func SaveSavedSSH(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	if duplicate, exists, err := store.FindDuplicate(profile); err != nil {
+		fmt.Println(err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	} else if exists {
+		responseBody.Msg = core.ErrSavedSSHAlreadyExists.Error()
+		responseBody.Data = map[string]interface{}{
+			"duplicate": true,
+			"profile":   duplicate,
+			"list":      store.List(),
+		}
+		return &responseBody
+	}
 	saved, err := store.Save(profile)
 	if err != nil {
 		fmt.Println(err)

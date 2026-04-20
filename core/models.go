@@ -60,7 +60,9 @@ func (wc *WriteCounter) Write(p []byte) (int, error) {
 }
 
 type wsOutput struct {
-	ws *websocket.Conn
+	ws         *websocket.Conn
+	mu         *sync.Mutex
+	activityFn func()
 }
 
 // Write 实现 io.Writer，将 SSH 输出写入 websocket。
@@ -78,7 +80,14 @@ func (w *wsOutput) Write(p []byte) (int, error) {
 		}
 		p = []byte(string(buf))
 	}
+	if w.mu != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+	}
 	err := w.ws.WriteMessage(websocket.TextMessage, p)
+	if err == nil && w.activityFn != nil {
+		w.activityFn()
+	}
 	return len(p), err
 }
 
@@ -93,6 +102,8 @@ type SSHClient struct {
 	Sftp      *sftp.Client
 	StdinPipe io.WriteCloser
 	Session   *ssh.Session
+	wsWriteMu *sync.Mutex
+	wsOutput  *wsOutput
 }
 
 // SSHSystemInfo 远端系统信息
@@ -144,6 +155,7 @@ func (sclient *SSHClient) Close() {
 		sclient.Session.Close()
 		sclient.Session = nil
 	}
+	sclient.wsOutput = nil
 	if sclient.Sftp != nil {
 		sclient.Sftp.Close()
 		sclient.Sftp = nil

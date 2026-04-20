@@ -79,10 +79,19 @@ type ipLocationCacheEntry struct {
 	expiresAt   time.Time
 }
 
+type resolvedIPCacheEntry struct {
+	ip        string
+	expiresAt time.Time
+}
+
 var (
 	ipLocationCacheTTL = 24 * time.Hour
 	ipLocationCacheMu  sync.RWMutex
 	ipLocationCache    = map[string]ipLocationCacheEntry{}
+
+	resolvedIPCacheTTL = 10 * time.Minute
+	resolvedIPCacheMu  sync.RWMutex
+	resolvedIPCache    = map[string]resolvedIPCacheEntry{}
 )
 
 // CollectSSHSystemInfo 采集 SSH 远端系统信息
@@ -192,6 +201,9 @@ func resolveSSHIPAddress(address string) string {
 	if ip := net.ParseIP(address); ip != nil {
 		return ip.String()
 	}
+	if cachedIP, ok := getCachedResolvedIP(address); ok {
+		return cachedIP
+	}
 	ips, err := net.LookupIP(address)
 	if err != nil {
 		return ""
@@ -201,11 +213,15 @@ func resolveSSHIPAddress(address string) string {
 			continue
 		}
 		if ip.IsGlobalUnicast() {
-			return ip.String()
+			resolved := ip.String()
+			setCachedResolvedIP(address, resolved)
+			return resolved
 		}
 	}
 	if len(ips) > 0 && ips[0] != nil {
-		return ips[0].String()
+		resolved := ips[0].String()
+		setCachedResolvedIP(address, resolved)
+		return resolved
 	}
 	return ""
 }
@@ -297,6 +313,34 @@ func setCachedIPLocation(ip, location, countryFlag string) {
 		expiresAt:   time.Now().Add(ipLocationCacheTTL),
 	}
 	ipLocationCacheMu.Unlock()
+}
+
+func getCachedResolvedIP(address string) (string, bool) {
+	resolvedIPCacheMu.RLock()
+	entry, ok := resolvedIPCache[address]
+	resolvedIPCacheMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		resolvedIPCacheMu.Lock()
+		delete(resolvedIPCache, address)
+		resolvedIPCacheMu.Unlock()
+		return "", false
+	}
+	return entry.ip, true
+}
+
+func setCachedResolvedIP(address, ip string) {
+	if strings.TrimSpace(address) == "" || strings.TrimSpace(ip) == "" {
+		return
+	}
+	resolvedIPCacheMu.Lock()
+	resolvedIPCache[address] = resolvedIPCacheEntry{
+		ip:        ip,
+		expiresAt: time.Now().Add(resolvedIPCacheTTL),
+	}
+	resolvedIPCacheMu.Unlock()
 }
 
 func humanizeUptime(seconds int64) string {

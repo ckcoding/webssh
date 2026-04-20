@@ -2,6 +2,8 @@ import axios from 'axios'
 import { Message } from 'element-ui'
 import i18n from '@/lang/index'
 
+let lastNetworkErrorAt = 0
+
 function getStatusMessage(status) {
     switch (status) {
     case 400:
@@ -35,6 +37,15 @@ function normalizeError(response) {
     }
 }
 
+function notifyNetworkError(message) {
+    const now = Date.now()
+    if (now-lastNetworkErrorAt < 3000) {
+        return
+    }
+    lastNetworkErrorAt = now
+    Message.error(message)
+}
+
 var instance = axios.create({
     timeout: 8000,
     baseURL: process.env.NODE_ENV === 'production' ? '/' : '/api',
@@ -59,8 +70,11 @@ instance.interceptors.response.use(
         return response.data
     },
     err => {
+        if (axios.isCancel(err) || err.code === 'ERR_CANCELED') {
+            return Promise.reject(err)
+        }
         if (err.response === undefined) {
-            Message.error(i18n.t('serverConnectionFailed'))
+            notifyNetworkError(i18n.t('serverConnectionFailed'))
             return Promise.reject(err)
         }
 

@@ -18,6 +18,8 @@ ARG VERSION=dev
 ARG BUILD_DATE=unknown
 ARG GIT_VERSION=unknown
 
+RUN apk add --no-cache git
+
 COPY go.mod go.sum ./
 RUN go mod download
 

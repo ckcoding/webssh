@@ -59,16 +59,19 @@
                     <div class="file-empty-hint">{{ currentPath }}</div>
                 </div>
 
-                <el-table v-else-if="fileList.length > 0" :data="fileList" :height="clientHeight" @row-click="rowClick"
+                <el-table v-else-if="displayFileList.length > 0" :data="displayFileList" :height="clientHeight" @row-click="rowClick"
                     class="premium-table" :class="{ 'is-locked': interactionLocked }" style="width: 100%">
                     <el-table-column :label="$t('Name')" min-width="260" sortable :sort-method="nameSort">
                         <template slot-scope="scope">
-                            <div v-if="scope.row.IsDir" class="file-icon-text folder">
+                            <div v-if="scope.row.IsDir" class="file-icon-text folder" :class="{ 'parent-nav-row': scope.row.IsParentNav }">
                                 <div class="file-icon-wrapper folder-icon">
-                                    <i class="el-icon-folder-opened"></i>
+                                    <i :class="scope.row.IsParentNav ? 'el-icon-top' : 'el-icon-folder-opened'"></i>
                                 </div>
                                 <div class="file-name-stack">
-                                    <span class="name-text">{{ scope.row.Name }}</span>
+                                    <template v-if="scope.row.IsParentNav">
+                                        <span class="name-text parent-nav-title">{{ $t('parentDirectory') }}</span>
+                                    </template>
+                                    <span v-else class="name-text">{{ scope.row.Name }}</span>
                                 </div>
                             </div>
                             <div v-else class="file-icon-text file">
@@ -100,7 +103,7 @@
                     <el-table-column :label="$t('Actions')" width="170" align="center">
                         <template slot-scope="scope">
                             <template v-if="scope.row.IsDir">
-                                <el-button type="text" size="mini" icon="el-icon-right" :disabled="interactionLocked"
+                                <el-button type="text" size="mini" :icon="scope.row.IsParentNav ? 'el-icon-top' : 'el-icon-right'" :disabled="interactionLocked"
                                     @click.stop="rowClick(scope.row)" class="action-btn open-action"
                                     :title="$t('Open')"></el-button>
                             </template>
@@ -134,16 +137,53 @@
                 :visible.sync="editorVisible"
                 :close-on-click-modal="false"
                 :close-on-press-escape="false"
-                :show-close="!(editorLoading || saveLoading || monacoLoading)"
+                :show-close="!(editorLoading || saveLoading)"
                 :before-close="handleEditorBeforeClose"
                 @closed="handleEditorClosed"
                 append-to-body width="80%" top="0">
-                <div v-loading="editorLoading || monacoLoading" :element-loading-text="$t('openingFile')" element-loading-spinner="el-icon-loading">
-                    <div ref="monacoContainer" style="width: 100%; height: 65vh; min-height: 500px; border-bottom: 1px solid #e2e8f0;"></div>
+                <div class="editor-stage" v-loading="saveLoading" :element-loading-text="$t('savingFile')" element-loading-spinner="el-icon-loading">
+                    <div v-if="editorLoading" class="editor-loading-state">
+                        <div class="editor-loading-card">
+                            <i class="el-icon-document"></i>
+                            <div class="editor-loading-title">{{ $t('openingFile') }}</div>
+                            <div class="editor-loading-path">{{ editingFilePath }}</div>
+                            <div class="editor-loading-hint">{{ $t('editorLoadingHint') }}</div>
+                        </div>
+                    </div>
+                    <template v-else>
+                        <el-alert
+                            v-if="editorMode === 'fallback' && monacoLoading"
+                            :title="$t('editorTextModeReady')"
+                            :description="$t('editorTextModeHint')"
+                            type="info"
+                            :closable="false"
+                            show-icon
+                            class="editor-fallback-alert">
+                        </el-alert>
+                        <el-alert
+                            v-else-if="editorMode === 'fallback' && monacoError !== ''"
+                            :title="$t('editorFallbackMode')"
+                            :description="monacoError"
+                            type="warning"
+                            :closable="false"
+                            show-icon
+                            class="editor-fallback-alert">
+                        </el-alert>
+                        <div
+                            v-if="editorMode === 'monaco'"
+                            ref="monacoContainer"
+                            style="width: 100%; height: 65vh; min-height: 500px; border-bottom: 1px solid #e2e8f0;"></div>
+                        <textarea
+                            v-else
+                            ref="fallbackEditor"
+                            v-model="editingContent"
+                            class="fallback-editor"
+                            spellcheck="false"></textarea>
+                    </template>
                 </div>
                 <div slot="footer" class="dialog-footer">
-                    <el-button size="small" :disabled="editorLoading || saveLoading || monacoLoading" @click="editorVisible = false">{{ $t('Cancel') }}</el-button>
-                    <el-button size="small" type="primary" :loading="saveLoading" :disabled="editorLoading || monacoLoading" @click="saveContent">{{ $t('saveChanges') }}</el-button>
+                    <el-button size="small" :disabled="editorLoading || saveLoading" @click="editorVisible = false">{{ $t('Cancel') }}</el-button>
+                    <el-button size="small" type="primary" :loading="saveLoading" :disabled="editorLoading || saveLoading" @click="saveContent">{{ $t('saveChanges') }}</el-button>
                 </div>
             </el-dialog>
 
@@ -195,6 +235,7 @@ const DIRECTORY_CACHE_TTL = 10 * 1000
 const FILE_CONTENT_CACHE_TTL = 30 * 1000
 const directoryCache = new Map()
 const fileContentCache = new Map()
+let monacoLoaderPromise = null
 const EDITABLE_EXTS = new Set(['js', 'ts', 'jsx', 'tsx', 'vue', 'py', 'go', 'rs', 'java', 'rb', 'c', 'cc', 'cpp', 'h', 'hpp', 'php', 'sh', 'bash', 'zsh', 'css', 'scss', 'less', 'html', 'htm', 'lua', 'swift', 'kt', 'json', 'yaml', 'yml', 'toml', 'xml', 'ini', 'conf', 'cfg', 'env', 'properties', 'sql', 'csv', 'md', 'txt', 'rst', 'log', 'out', 'err'])
 const EDITABLE_FILENAMES = new Set(['dockerfile', 'makefile', '.env', '.gitignore', '.gitattributes', '.editorconfig', '.npmrc', '.yarnrc', '.zshrc', '.bashrc', '.profile', 'readme', 'readme.md'])
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'avif'])
@@ -212,6 +253,30 @@ function normalizePath(path) {
         nextPath = nextPath.replace(/\/+$/, '')
     }
     return nextPath || '/'
+}
+
+function getParentPath(path) {
+    const currentPath = normalizePath(path)
+    if (currentPath === '/') {
+        return '/'
+    }
+    const segments = currentPath.split('/').filter(Boolean)
+    segments.pop()
+    return segments.length === 0 ? '/' : `/${segments.join('/')}`
+}
+
+function createParentDirectoryEntry(path) {
+    if (normalizePath(path) === '/') {
+        return null
+    }
+    return {
+        Name: '../',
+        Size: '-',
+        ModifyTime: '',
+        IsDir: true,
+        IsParentNav: true,
+        ParentPath: getParentPath(path)
+    }
 }
 
 function buildCacheKey(sshInfo, path) {
@@ -301,6 +366,8 @@ export default {
             editorVisible: false,
             editorLoading: false,
             monacoLoading: false,
+            editorMode: 'monaco',
+            monacoError: '',
             saveLoading: false,
             previewVisible: false,
             previewLoading: false,
@@ -309,6 +376,7 @@ export default {
             previewFileName: '',
             previewFilePath: '',
             editingContent: '',
+            originalEditingContent: '',
             editingFileName: '',
             editingFilePath: '',
             createLoading: false,
@@ -317,7 +385,10 @@ export default {
             activeUploads: 0,
             listRequestToken: 0,
             editorRequestToken: 0,
-            uploadRefreshTimer: null
+            listAbortController: null,
+            editorAbortController: null,
+            uploadRefreshTimer: null,
+            uploadProgressSockets: {}
         }
     },
     created() {
@@ -334,6 +405,13 @@ export default {
         ...mapState(['currentTab']),
         hasActiveConnection() {
             return Boolean(this.currentTab && this.currentTab.name)
+        },
+        displayFileList() {
+            const parentEntry = createParentDirectoryEntry(this.currentPath)
+            if (parentEntry === null) {
+                return this.fileList
+            }
+            return [parentEntry, ...this.fileList]
         },
         interactionLocked() {
             return this.loading || this.editorLoading || this.saveLoading || this.previewLoading || this.createLoading || this.activeUploads > 0
@@ -370,6 +448,7 @@ export default {
     },
     watch: {
         currentTab: function () {
+            this.cancelListRequest()
             this.fileList = []
             this.currentPath = normalizePath(this.currentTab && this.currentTab.path)
             const cached = this.getDirectoryCache(this.currentPath)
@@ -388,6 +467,7 @@ export default {
             }
             this.currentPath = normalizePath(this.currentTab && this.currentTab.path)
             this.dialogVisible = true
+            this.warmupMonaco()
             this.getFileList({ clearBeforeLoad: true })
         },
         handleMainDialogBeforeClose(done) {
@@ -397,35 +477,137 @@ export default {
             }
             done()
         },
-        handleEditorBeforeClose(done) {
-            if (this.editorLoading || this.saveLoading || this.monacoLoading) {
+        async handleEditorBeforeClose(done) {
+            if (this.editorLoading || this.saveLoading) {
                 this.$message.warning(this.$t('fileOperationLocked'))
                 return
+            }
+            if (this.hasUnsavedEditorChanges()) {
+                try {
+                    await MessageBox.confirm(
+                        this.$t('discardUnsavedChangesMessage'),
+                        this.$t('discardUnsavedChangesTitle'),
+                        {
+                            confirmButtonText: this.$t('discardChanges'),
+                            cancelButtonText: this.$t('keepEditing'),
+                            type: 'warning',
+                            closeOnClickModal: false,
+                            closeOnPressEscape: false
+                        }
+                    )
+                } catch {
+                    return
+                }
             }
             done()
         },
         handleEditorClosed() {
+            this.cancelEditorRequest()
             if (this.monacoEditor) {
                 this.monacoEditor.dispose()
                 this.monacoEditor = null
             }
+            this.editorLoading = false
+            this.monacoLoading = false
+            this.editorMode = 'monaco'
+            this.monacoError = ''
+            this.editingContent = ''
+            this.originalEditingContent = ''
+            this.editingFileName = ''
+            this.editingFilePath = ''
+        },
+        isAbortError(error) {
+            return Boolean(error && (error.code === 'ERR_CANCELED' || error.__CANCEL__))
+        },
+        cancelListRequest() {
+            if (this.listAbortController !== null) {
+                this.listAbortController.abort()
+                this.listAbortController = null
+            }
+        },
+        cancelEditorRequest() {
+            if (this.editorAbortController !== null) {
+                this.editorAbortController.abort()
+                this.editorAbortController = null
+            }
+        },
+        hasUnsavedEditorChanges() {
+            return this.editingFilePath !== '' && this.editingContent !== this.originalEditingContent
+        },
+        warmupMonaco() {
+            if (window.monaco || monacoLoaderPromise !== null) {
+                return
+            }
+            this.loadMonaco().catch(() => {})
+        },
+        resolveEditorMode() {
+            return this.loadMonaco()
+                .then(() => ({
+                    mode: 'monaco',
+                    error: ''
+                }))
+                .catch(error => ({
+                    mode: 'fallback',
+                    error: error && error.message ? error.message : this.$t('editorFallbackHint')
+                }))
+        },
+        focusCurrentEditor(filename, requestToken) {
+            this.$nextTick(() => {
+                if (requestToken !== this.editorRequestToken || !this.editorVisible) {
+                    return
+                }
+                if (this.editorMode === 'monaco') {
+                    this.initMonaco(filename)
+                    return
+                }
+                if (this.$refs.fallbackEditor) {
+                    this.$refs.fallbackEditor.focus()
+                }
+            })
         },
         loadMonaco() {
-            return new Promise((resolve) => {
+            if (window.monaco) {
+                return Promise.resolve(window.monaco)
+            }
+            if (monacoLoaderPromise !== null) {
+                return monacoLoaderPromise
+            }
+            monacoLoaderPromise = new Promise((resolve, reject) => {
+                const resolveMonaco = () => {
+                    if (!window.require || typeof window.require.config !== 'function') {
+                        monacoLoaderPromise = null
+                        reject(new Error(this.$t('editorFallbackHint')))
+                        return
+                    }
+                    window.require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } })
+                    window.require(['vs/editor/editor.main'], () => {
+                        resolve(window.monaco)
+                    }, () => {
+                        monacoLoaderPromise = null
+                        reject(new Error(this.$t('editorFallbackHint')))
+                    })
+                }
                 if (window.monaco) {
                     resolve(window.monaco)
                     return
                 }
+                if (window.require && typeof window.require.config === 'function') {
+                    resolveMonaco()
+                    return
+                }
                 const script = document.createElement('script')
                 script.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs/loader.min.js'
+                script.async = true
                 script.onload = () => {
-                    window.require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.36.1/min/vs' } })
-                    window.require(['vs/editor/editor.main'], () => {
-                        resolve(window.monaco)
-                    })
+                    resolveMonaco()
+                }
+                script.onerror = () => {
+                    monacoLoaderPromise = null
+                    reject(new Error(this.$t('editorFallbackHint')))
                 }
                 document.head.appendChild(script)
             })
+            return monacoLoaderPromise
         },
         initMonaco(filename) {
             if (this.monacoEditor) {
@@ -495,6 +677,9 @@ export default {
             return this.getCapabilities(row).playable
         },
         fileCapabilityTags(row) {
+            if (row && row.IsParentNav) {
+                return []
+            }
             const caps = this.getCapabilities(row)
             const tags = []
             if (caps.editable) {
@@ -723,16 +908,40 @@ export default {
         uploadSuccess(r, file) {
             this.uploadTip = `${file.name}${this.$t('uploadFinish')}!`
             this.activeUploads = Math.max(0, this.activeUploads - 1)
+            this.closeUploadProgressSocket(file && file.uid)
             this.scheduleDirectoryRefresh(this.currentPath)
         },
         uploadError() {
             this.activeUploads = Math.max(0, this.activeUploads - 1)
+            this.closeUploadProgressSocket()
             this.$message.error(this.$t('uploadFailed'))
+        },
+        closeUploadProgressSocket(uid) {
+            const closeSocket = (key) => {
+                const socket = this.uploadProgressSockets[key]
+                if (socket) {
+                    socket.close()
+                    this.$delete(this.uploadProgressSockets, key)
+                }
+            }
+            if (uid !== undefined && uid !== null && uid !== '') {
+                closeSocket(uid)
+                return
+            }
+            Object.keys(this.uploadProgressSockets).forEach(closeSocket)
+        },
+        forgetUploadProgressSocket(uid) {
+            if (uid === undefined || uid === null || uid === '') {
+                return
+            }
+            if (this.uploadProgressSockets[uid]) {
+                this.$delete(this.uploadProgressSockets, uid)
+            }
         },
         uploadProgress(e, f) {
             e.percent = e.percent / 2
             f.percentage = f.percentage / 2
-            if (e.percent === 50) {
+            if (e.percent === 50 && !this.uploadProgressSockets[f.uid]) {
                 const params = {
                     id: f.uid
                 }
@@ -742,13 +951,29 @@ export default {
                 }
                 const query = new URLSearchParams(params).toString()
                 const ws = new WebSocket(`${(location.protocol === 'http:' ? 'ws' : 'wss')}://${location.host}${process.env.NODE_ENV === 'production' ? '' : '/ws'}/file/progress?${query}`)
+                this.$set(this.uploadProgressSockets, f.uid, ws)
                 ws.onmessage = e1 => {
                     f.percentage = (f.size + Number(e1.data)) / (f.size * 2) * 100
+                }
+                ws.onclose = () => {
+                    this.forgetUploadProgressSocket(f.uid)
+                }
+                ws.onerror = () => {
+                    this.closeUploadProgressSocket(f.uid)
                 }
             }
         },
         nameSort(a, b) {
-            return a.Name > b.Name
+            if (Boolean(a.IsParentNav) !== Boolean(b.IsParentNav)) {
+                return a.IsParentNav ? -1 : 1
+            }
+            if (a.IsDir !== b.IsDir) {
+                return a.IsDir ? -1 : 1
+            }
+            return String(a.Name || '').localeCompare(String(b.Name || ''), undefined, {
+                numeric: true,
+                sensitivity: 'base'
+            })
         },
         fileTypeClass(name) {
             if (!name) return 'file-generic'
@@ -771,6 +996,11 @@ export default {
             if (this.interactionLocked) return
 
             let targetPath = ''
+            if (row.IsParentNav) {
+                this.currentPath = normalizePath(row.ParentPath)
+                this.getFileList({ clearBeforeLoad: true })
+                return
+            }
             if (row.IsDir) {
                 // 统一收口路径，避免出现 /home/home 这类重复拼接。
                 const base = this.currentPath.replace(/\/+$/, '')
@@ -799,15 +1029,17 @@ export default {
             this.downloadFile()
         },
         async getFileList(options = {}) {
-            if (this.loading) return
+            this.cancelListRequest()
             this.loading = true
 
+            const controller = typeof AbortController === 'function' ? new AbortController() : null
+            const requestToken = ++this.listRequestToken
+            this.listAbortController = controller
             try {
                 // 先标准化路径，再决定是否命中目录缓存。
                 let path = normalizePath(this.currentPath)
                 this.currentPath = path
                 const force = Boolean(options.force)
-                const requestToken = ++this.listRequestToken
 
                 if (!force) {
                     const cachedList = this.getDirectoryCache(path)
@@ -822,7 +1054,9 @@ export default {
                     this.fileList = []
                 }
 
-                const result = await fileList(this.currentPath, this.$store.getters.sshReq)
+                const result = await fileList(this.currentPath, this.$store.getters.sshReq, controller === null ? {} : {
+                    signal: controller.signal
+                })
                 if (requestToken !== this.listRequestToken) {
                     return
                 }
@@ -835,8 +1069,20 @@ export default {
                     this.fileList = []
                     this.$message.error(result.Msg)
                 }
+            } catch (error) {
+                if (this.isAbortError(error)) {
+                    return
+                }
+                if (requestToken === this.listRequestToken) {
+                    this.fileList = []
+                }
             } finally {
-                this.loading = false
+                if (this.listAbortController === controller) {
+                    this.listAbortController = null
+                }
+                if (requestToken === this.listRequestToken) {
+                    this.loading = false
+                }
             }
         },
         upDirectory() {
@@ -857,7 +1103,13 @@ export default {
         },
         downloadFile() {
             const downloadUrl = this.buildFileUrl(this.downloadFilePath)
-            window.open(downloadUrl)
+            const link = document.createElement('a')
+            link.href = downloadUrl
+            link.rel = 'noopener'
+            link.download = ''
+            document.body.appendChild(link)
+            link.click()
+            document.body.removeChild(link)
         },
         updatePath(path) {
             const termList = this.$store.state.termList
@@ -876,14 +1128,24 @@ export default {
                 }
                 return
             }
+            this.cancelEditorRequest()
             this.editingFileName = row.Name
             this.editingFilePath = this.buildFilePath(row)
             this.editorVisible = true
             this.editingContent = ''
-            
-            this.monacoLoading = true
+            this.originalEditingContent = ''
+            this.editorMode = 'monaco'
+            this.monacoError = ''
             const requestToken = ++this.editorRequestToken
             this.editorLoading = true
+            this.monacoLoading = true
+            const controller = typeof AbortController === 'function' ? new AbortController() : null
+            this.editorAbortController = controller
+            let monacoModeResult = null
+            const monacoReadyPromise = this.resolveEditorMode().then(result => {
+                monacoModeResult = result
+                return result
+            })
             
             try {
                 let content = ''
@@ -891,7 +1153,9 @@ export default {
                 if (cachedContent !== null) {
                     content = cachedContent
                 } else {
-                    const res = await getFileContent(this.editingFilePath, this.$store.getters.sshReq)
+                    const res = await getFileContent(this.editingFilePath, this.$store.getters.sshReq, controller === null ? {} : {
+                        signal: controller.signal
+                    })
                     if (requestToken !== this.editorRequestToken) return
                     if (res.Msg === 'success') {
                         content = res.Data
@@ -904,19 +1168,50 @@ export default {
                 }
                 
                 this.editingContent = content
-                
-                await this.loadMonaco()
-                
+                this.originalEditingContent = content
+                await Promise.resolve()
+
+                if (monacoModeResult !== null) {
+                    this.editorMode = monacoModeResult.mode
+                    this.monacoError = monacoModeResult.error
+                    this.monacoLoading = false
+                    this.editorLoading = false
+                    this.focusCurrentEditor(row.Name, requestToken)
+                    return
+                }
+
+                this.editorMode = 'fallback'
+                this.monacoError = ''
+                this.editorLoading = false
+                this.focusCurrentEditor(row.Name, requestToken)
+
+                const resolvedEditorMode = await monacoReadyPromise
+                if (requestToken !== this.editorRequestToken || !this.editorVisible) {
+                    return
+                }
+                this.monacoLoading = false
+                if (resolvedEditorMode.mode === 'monaco' && !this.hasUnsavedEditorChanges()) {
+                    this.editorMode = 'monaco'
+                    this.monacoError = ''
+                    this.focusCurrentEditor(row.Name, requestToken)
+                    return
+                }
+                if (resolvedEditorMode.mode === 'fallback') {
+                    this.monacoError = resolvedEditorMode.error
+                }
             } catch (e) {
+                if (this.isAbortError(e)) {
+                    return
+                }
                 this.$message.error(this.$t('networkRequestFailed'))
                 this.editorVisible = false
             } finally {
-                this.editorLoading = false
-                this.monacoLoading = false
-                if (this.editorVisible) {
-                    this.$nextTick(() => {
-                        this.initMonaco(row.Name)
-                    })
+                if (this.editorAbortController === controller) {
+                    this.editorAbortController = null
+                }
+                if (requestToken === this.editorRequestToken && !this.editorVisible) {
+                    this.editorLoading = false
+                    this.monacoLoading = false
                 }
             }
         },
@@ -950,6 +1245,7 @@ export default {
                 if (res.Msg === 'success') {
                     this.setFileContentCache(this.editingFilePath, this.editingContent)
                     this.invalidateDirectoryCache(this.currentPath)
+                    this.originalEditingContent = this.editingContent
                     this.$message.success(this.$t('saveFileSuccess'))
                     this.editorVisible = false
                 } else {
@@ -965,6 +1261,8 @@ export default {
         }
     },
     beforeDestroy() {
+        this.cancelListRequest()
+        this.cancelEditorRequest()
         if (this.resizeHandler !== null) {
             window.removeEventListener('resize', this.resizeHandler)
             this.resizeHandler = null
@@ -973,6 +1271,7 @@ export default {
             clearTimeout(this.uploadRefreshTimer)
             this.uploadRefreshTimer = null
         }
+        this.closeUploadProgressSocket()
         this.resetPreviewState()
     }
 }
@@ -985,6 +1284,110 @@ export default {
 
 .file-browser-content {
     position: relative;
+}
+
+.editor-fallback-alert {
+    margin-bottom: 12px;
+}
+
+.parent-nav-row {
+    color: #334155 !important;
+
+    .file-icon-wrapper.folder-icon {
+        background: rgba(148, 163, 184, 0.12) !important;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+
+        i {
+            color: #475569 !important;
+        }
+    }
+
+    .parent-nav-title {
+        color: #334155;
+        font-weight: 600;
+    }
+}
+
+.editor-stage {
+    min-height: 500px;
+}
+
+.editor-loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 65vh;
+    padding: 24px;
+    background:
+        radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 48%),
+        #f8fafc;
+}
+
+.editor-loading-card {
+    width: min(100%, 520px);
+    padding: 28px 24px;
+    border: 1px solid #e2e8f0;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+    text-align: center;
+
+    i {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 56px;
+        height: 56px;
+        margin-bottom: 16px;
+        border-radius: 16px;
+        background: rgba(59, 130, 246, 0.12);
+        color: #2563eb;
+        font-size: 26px;
+    }
+
+    .editor-loading-title {
+        font-size: 16px;
+        font-weight: 700;
+        color: #0f172a;
+    }
+
+    .editor-loading-path {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        color: #475569;
+        font: 12px/1.5 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+        word-break: break-all;
+    }
+
+    .editor-loading-hint {
+        margin-top: 12px;
+        color: #64748b;
+        font-size: 13px;
+        line-height: 1.6;
+    }
+}
+
+.fallback-editor {
+    width: 100%;
+    height: 65vh;
+    min-height: 500px;
+    padding: 16px 18px;
+    border: 1px solid #dbe3ee;
+    border-radius: 12px;
+    resize: vertical;
+    outline: none;
+    box-sizing: border-box;
+    background: #ffffff;
+    color: #0f172a;
+    font: 13px/1.65 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+
+    &:focus {
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
 }
 
 ::v-deep .premium-file-dialog {

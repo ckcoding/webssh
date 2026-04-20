@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,9 +40,10 @@ type SSHProfileStore struct {
 }
 
 var (
-	sshProfileStore     *SSHProfileStore
-	sshProfileStoreErr  error
-	sshProfileStoreOnce sync.Once
+	ErrSavedSSHAlreadyExists = errors.New("saved ssh already exists")
+	sshProfileStore          *SSHProfileStore
+	sshProfileStoreErr       error
+	sshProfileStoreOnce      sync.Once
 )
 
 // NewSSHProfileStore 创建存储实例
@@ -127,26 +129,74 @@ func (s *SSHProfileStore) List() []SavedSSHProfile {
 	return result
 }
 
+// FindDuplicate 查找同一主机身份是否已存在，编辑自身时会自动跳过。
+func (s *SSHProfileStore) FindDuplicate(profile SavedSSHProfile) (SavedSSHProfile, bool, error) {
+	normalized, err := normalizeSavedSSHProfile(profile)
+	if err != nil {
+		return SavedSSHProfile{}, false, err
+	}
+	requestedID := strings.TrimSpace(profile.ID)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for i := range s.profiles {
+		if s.profiles[i].ID != normalized.ID {
+			continue
+		}
+		if requestedID != "" && s.profiles[i].ID == requestedID {
+			return SavedSSHProfile{}, false, nil
+		}
+		return s.profiles[i], true, nil
+	}
+	return SavedSSHProfile{}, false, nil
+}
+
 // Save 保存或更新 SSH 配置
 func (s *SSHProfileStore) Save(profile SavedSSHProfile) (SavedSSHProfile, error) {
 	normalized, err := normalizeSavedSSHProfile(profile)
 	if err != nil {
 		return SavedSSHProfile{}, err
 	}
+	requestedID := strings.TrimSpace(profile.ID)
 	now := time.Now().Format(time.RFC3339)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	updateIndex := -1
+	duplicateIndex := -1
 	for i := range s.profiles {
+		if requestedID != "" && s.profiles[i].ID == requestedID {
+			updateIndex = i
+		}
 		if s.profiles[i].ID == normalized.ID {
-			normalized.CreatedAt = s.profiles[i].CreatedAt
-			normalized.UpdatedAt = now
-			s.profiles[i] = normalized
-			if err := s.persistLocked(); err != nil {
-				return SavedSSHProfile{}, err
-			}
-			return normalized, nil
+			duplicateIndex = i
 		}
 	}
+
+	if updateIndex >= 0 {
+		normalized.CreatedAt = s.profiles[updateIndex].CreatedAt
+		normalized.UpdatedAt = now
+		s.profiles[updateIndex] = normalized
+		if duplicateIndex >= 0 && duplicateIndex != updateIndex {
+			s.profiles = append(s.profiles[:duplicateIndex], s.profiles[duplicateIndex+1:]...)
+		}
+		if err := s.persistLocked(); err != nil {
+			return SavedSSHProfile{}, err
+		}
+		return normalized, nil
+	}
+
+	if duplicateIndex >= 0 {
+		normalized.CreatedAt = s.profiles[duplicateIndex].CreatedAt
+		normalized.UpdatedAt = now
+		s.profiles[duplicateIndex] = normalized
+		if err := s.persistLocked(); err != nil {
+			return SavedSSHProfile{}, err
+		}
+		return normalized, nil
+	}
+
 	normalized.CreatedAt = now
 	normalized.UpdatedAt = now
 	s.profiles = append(s.profiles, normalized)

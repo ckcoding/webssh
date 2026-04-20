@@ -1,6 +1,7 @@
 import request from '@/utils/request'
-export function fileList(path, sshInfo) {
+export function fileList(path, sshInfo, config = {}) {
     return request.get('/file/list', {
+        ...config,
         params: {
             path,
             sshInfo
@@ -8,8 +9,9 @@ export function fileList(path, sshInfo) {
     })
 }
 
-export function getFileContent(path, sshInfo) {
+export function getFileContent(path, sshInfo, config = {}) {
     return request.get('/file/content', {
+        ...config,
         params: {
             path,
             sshInfo

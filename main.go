@@ -58,6 +58,18 @@ func isAuthorized(c *gin.Context) bool {
 	return authHeader == sessionToken
 }
 
+func isSecureRequest(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))) {
+	case "https", "wss":
+		return true
+	default:
+		return false
+	}
+}
+
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if isAuthorized(c) {
@@ -105,7 +117,14 @@ func init() {
 func staticRouter(router *gin.Engine) {
 	router.GET("/", func(c *gin.Context) {
 		indexHTML, _ := f.ReadFile("web/dist/" + "index.html")
-		c.Writer.Write(indexHTML)
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	})
+	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		c.Next()
 	})
 	staticFs, _ := fs.Sub(f, "web/dist/static")
 	router.StaticFS("/static", http.FS(staticFs))
@@ -114,6 +133,15 @@ func staticRouter(router *gin.Engine) {
 func main() {
 	server := gin.Default()
 	server.SetTrustedProxies(nil)
+
+	server.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "SAMEORIGIN")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Next()
+	})
+
 	server.Use(gzip.Gzip(gzip.DefaultCompression))
 	staticRouter(server)
 
@@ -135,7 +163,8 @@ func main() {
 			return
 		}
 		if req.Username == username && req.Password == password {
-			c.SetCookie("webssh_token", sessionToken, 3600*24*7, "/", "", false, false)
+			c.SetSameSite(http.SameSiteLaxMode)
+			c.SetCookie("webssh_token", sessionToken, 3600*24*7, "/", "", isSecureRequest(c), true)
 			c.JSON(200, gin.H{"Msg": "success", "token": sessionToken})
 			return
 		}
@@ -177,11 +206,17 @@ func main() {
 	}
 	ssh := authGroup.Group("/ssh")
 	{
+		ssh.POST("/check", func(c *gin.Context) {
+			c.JSON(200, controller.CheckSSHConnection(c))
+		})
 		ssh.GET("/saved", func(c *gin.Context) {
 			c.JSON(200, controller.ListSavedSSH(c))
 		})
 		ssh.GET("/system", func(c *gin.Context) {
 			c.JSON(200, controller.GetSSHSystemInfo(c))
+		})
+		ssh.GET("/system/stream", func(c *gin.Context) {
+			controller.StreamSSHSystemInfo(c)
 		})
 		ssh.POST("/saved", func(c *gin.Context) {
 			c.JSON(200, controller.SaveSavedSSH(c))
@@ -190,5 +225,14 @@ func main() {
 			c.JSON(200, controller.DeleteSavedSSH(c))
 		})
 	}
-	server.Run(fmt.Sprintf(":%d", *port))
+	httpServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", *port),
+		Handler:           server,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Println(err)
+	}
 }

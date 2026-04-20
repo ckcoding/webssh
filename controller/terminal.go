@@ -14,8 +14,8 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  8192,
+	WriteBufferSize: 8192,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -27,6 +27,7 @@ var upgrader = websocket.Upgrader{
 		}
 		return strings.EqualFold(originURL.Host, r.Host)
 	},
+	EnableCompression: true,
 }
 
 // TermWs 获取终端ws

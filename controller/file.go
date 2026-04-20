@@ -269,6 +269,7 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
+	defer wsConn.Close()
 	id := c.Query("id")
 
 	var ready, find bool
@@ -280,7 +281,10 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		}
 		for _, v := range counters {
 			if v.Id == id {
-				wsConn.WriteMessage(1, []byte(strconv.Itoa(v.Total)))
+				if err := wsConn.WriteMessage(1, []byte(strconv.Itoa(v.Total))); err != nil {
+					responseBody.Msg = err.Error()
+					return &responseBody
+				}
 				find = true
 				if !ready {
 					ready = true
@@ -289,7 +293,6 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 			}
 		}
 		if ready && !find {
-			wsConn.Close()
 			break
 		}
 

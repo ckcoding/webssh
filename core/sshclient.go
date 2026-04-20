@@ -11,8 +11,50 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+const (
+	websocketReadTimeout     = 60 * time.Second
+	websocketPingInterval    = 15 * time.Second
+	websocketWriteTimeout    = 10 * time.Second
+	sshKeepaliveInterval     = 20 * time.Second
+	tcpKeepaliveInterval     = 15 * time.Second
+	defaultSSHConnectTimeout = 10 * time.Second
+)
+
+func normalizeSSHClientAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if strings.Contains(address, ":") && !strings.HasPrefix(address, "[") {
+		address = "[" + address + "]"
+	}
+	return address
+}
+
+// BuildSSHClient 根据输入构建并校验一个 SSH 客户端配置。
+func BuildSSHClient(address, username, password string, port, loginType int) (SSHClient, error) {
+	client := NewSSHClient()
+	client.IPAddress = normalizeSSHClientAddress(address)
+	if client.IPAddress == "" {
+		return client, fmt.Errorf("host is required")
+	}
+	client.Username = strings.TrimSpace(username)
+	if client.Username == "" {
+		return client, fmt.Errorf("username is required")
+	}
+	if strings.TrimSpace(password) == "" {
+		return client, fmt.Errorf("password is required")
+	}
+	client.Password = password
+	if port > 0 {
+		client.Port = port
+	}
+	if loginType == 1 {
+		client.LoginType = 1
+	}
+	return client, nil
+}
 
 // DecodedMsgToSSHClient 字符串信息解析为ssh客户端
 func DecodedMsgToSSHClient(sshInfo string) (SSHClient, error) {
@@ -25,9 +67,7 @@ func DecodedMsgToSSHClient(sshInfo string) (SSHClient, error) {
 	if err != nil {
 		return client, err
 	}
-	if strings.Contains(client.IPAddress, ":") && string(client.IPAddress[0]) != "[" {
-		client.IPAddress = "[" + client.IPAddress + "]"
-	}
+	client.IPAddress = normalizeSSHClientAddress(client.IPAddress)
 	return client, nil
 }
 
@@ -53,14 +93,22 @@ func (sclient *SSHClient) GenerateClient() error {
 	}
 	config = ssh.Config{
 		Ciphers: []string{
-			"aes128-ctr", "aes192-ctr", "aes256-ctr",
 			"aes128-gcm@openssh.com",
+			"chacha20-poly1305@openssh.com",
+			"aes128-ctr", "aes192-ctr", "aes256-ctr",
+			"aes256-gcm@openssh.com",
 			"arcfour256", "arcfour128",
 			"aes128-cbc", "3des-cbc",
 			"aes192-cbc", "aes256-cbc",
 		},
 		KeyExchanges: []string{
+			"curve25519-sha256",
+			"curve25519-sha256@libssh.org",
+			"ecdh-sha2-nistp256",
+			"ecdh-sha2-nistp384",
+			"ecdh-sha2-nistp521",
 			"diffie-hellman-group-exchange-sha256",
+			"diffie-hellman-group14-sha256",
 			"diffie-hellman-group14-sha1",
 			"diffie-hellman-group1-sha1",
 		},
@@ -68,16 +116,27 @@ func (sclient *SSHClient) GenerateClient() error {
 	clientConfig = &ssh.ClientConfig{
 		User:    sclient.Username,
 		Auth:    auth,
-		Timeout: 15 * time.Second,
+		Timeout: defaultSSHConnectTimeout,
 		Config:  config,
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
 	}
 	addr = fmt.Sprintf("%s:%d", sclient.IPAddress, sclient.Port)
-	if client, err = ssh.Dial("tcp", addr, clientConfig); err != nil {
+	dialer := &net.Dialer{
+		Timeout:   defaultSSHConnectTimeout,
+		KeepAlive: tcpKeepaliveInterval,
+	}
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
 		return err
 	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, clientConfig)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	client = ssh.NewClient(sshConn, chans, reqs)
 	sclient.Client = client
 	return nil
 }
@@ -96,6 +155,9 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 	sshSession.Stdout = wsOutput
 	sshSession.Stderr = wsOutput
 	wsOutput.ws = ws
+	sclient.wsWriteMu = &sync.Mutex{}
+	wsOutput.mu = sclient.wsWriteMu
+	sclient.wsOutput = wsOutput
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
 		ssh.TTY_OP_ISPEED: 14400,
@@ -140,37 +202,77 @@ func (sclient *SSHClient) RunCommand(command string) (string, error) {
 
 // Connect ws连接
 func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, closeTip string) {
+	if sclient.Client == nil || sclient.Session == nil || sclient.StdinPipe == nil {
+		ws.WriteMessage(websocket.TextMessage, []byte("ssh terminal is not initialized"))
+		ws.Close()
+		return
+	}
+
 	stopCh := make(chan struct{})
+	activityCh := make(chan struct{}, 1)
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			close(stopCh)
+		})
+	}
+	notifyActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
+
+	ws.SetReadDeadline(time.Now().Add(websocketReadTimeout))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(websocketReadTimeout))
+	})
+	if sclient.wsOutput != nil {
+		sclient.wsOutput.activityFn = notifyActivity
+	}
+
 	//这里第一个协程获取用户的输入
 	go func() {
 		for {
 			// p为用户输入
 			_, p, err := ws.ReadMessage()
 			if err != nil {
-				close(stopCh)
+				stop()
 				return
 			}
-			if string(p) == "ping" {
-				continue
-			}
-			if strings.Contains(string(p), "resize") {
+			ws.SetReadDeadline(time.Now().Add(websocketReadTimeout))
+			notifyActivity()
+			if strings.HasPrefix(string(p), "resize:") {
 				resizeSlice := strings.Split(string(p), ":")
+				if len(resizeSlice) != 3 {
+					continue
+				}
 				rows, _ := strconv.Atoi(resizeSlice[1])
 				cols, _ := strconv.Atoi(resizeSlice[2])
 				err := sclient.Session.WindowChange(rows, cols)
 				if err != nil {
 					log.Println(err)
-					close(stopCh)
+					stop()
 					return
 				}
 				continue
 			}
 			_, err = sclient.StdinPipe.Write(p)
 			if err != nil {
-				close(stopCh)
+				stop()
 				return
 			}
 		}
+	}()
+
+	go func() {
+		if sclient.Session == nil {
+			return
+		}
+		if err := sclient.Session.Wait(); err != nil {
+			log.Println(err)
+		}
+		stop()
 	}()
 
 	defer func() {
@@ -184,13 +286,46 @@ func (sclient *SSHClient) Connect(ws *websocket.Conn, timeout time.Duration, clo
 	// 设置ws超时时间timer
 	stopTimer := time.NewTimer(timeout)
 	defer stopTimer.Stop()
+	wsPingTicker := time.NewTicker(websocketPingInterval)
+	defer wsPingTicker.Stop()
+	sshKeepaliveTicker := time.NewTicker(sshKeepaliveInterval)
+	defer sshKeepaliveTicker.Stop()
+	resetStopTimer := func() {
+		if !stopTimer.Stop() {
+			select {
+			case <-stopTimer.C:
+			default:
+			}
+		}
+		stopTimer.Reset(timeout)
+	}
 	// 主循环
 	for {
 		select {
 		case <-stopCh:
 			return
+		case <-activityCh:
+			resetStopTimer()
+		case <-wsPingTicker.C:
+			if err := ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(websocketWriteTimeout)); err != nil {
+				log.Println(err)
+				return
+			}
+		case <-sshKeepaliveTicker.C:
+			if sclient.Client != nil {
+				if _, _, err := sclient.Client.SendRequest("keepalive@webssh", false, nil); err != nil {
+					log.Println(err)
+					return
+				}
+			}
 		case <-stopTimer.C:
-			ws.WriteMessage(1, []byte(fmt.Sprintf("\u001B[33m%s\u001B[0m", closeTip)))
+			if sclient.wsWriteMu != nil {
+				sclient.wsWriteMu.Lock()
+				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\u001B[33m%s\u001B[0m", closeTip)))
+				sclient.wsWriteMu.Unlock()
+			} else {
+				ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\u001B[33m%s\u001B[0m", closeTip)))
+			}
 			return
 		}
 	}
