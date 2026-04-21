@@ -92,6 +92,8 @@ var (
 	resolvedIPCacheTTL = 10 * time.Minute
 	resolvedIPCacheMu  sync.RWMutex
 	resolvedIPCache    = map[string]resolvedIPCacheEntry{}
+
+	ipWhoisClient = &http.Client{Timeout: 4 * time.Second}
 )
 
 // CollectSSHSystemInfo 采集 SSH 远端系统信息
@@ -238,8 +240,7 @@ func lookupIPLocation(ip string) (string, string) {
 		return location, countryFlag
 	}
 
-	client := &http.Client{Timeout: 4 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("https://ipwho.is/%s", ip))
+	resp, err := ipWhoisClient.Get(fmt.Sprintf("https://ipwho.is/%s", ip))
 	if err != nil {
 		return "", ""
 	}

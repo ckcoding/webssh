@@ -63,7 +63,8 @@ export default {
             contextMenuVisible: false,
             left: '',
             top: '',
-            sortableInstance: null
+            sortableInstance: null,
+            shortcutHandler: null
         }
     },
     computed: {
@@ -97,6 +98,8 @@ export default {
     },
     mounted() {
         this.bindTabInteractions()
+        this.shortcutHandler = (event) => this.handleGlobalShortcut(event)
+        window.addEventListener('keydown', this.shortcutHandler, true)
     },
     methods: {
         getTermRef(name) {
@@ -323,12 +326,89 @@ export default {
                     tab.closable = !tab.closable
                 }
             }
+        },
+        isTypingTarget(target) {
+            if (target === null || target === undefined) {
+                return false
+            }
+            const tag = (target.tagName || '').toUpperCase()
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+                return true
+            }
+            if (target.isContentEditable) {
+                return true
+            }
+            // xterm 的终端取用 .xterm-helper-textarea 接收键盘事件；它是预期的输入目标。
+            if (target.classList && target.classList.contains('xterm-helper-textarea')) {
+                return 'xterm'
+            }
+            return false
+        },
+        switchToTabByIndex(index) {
+            if (index < 0 || index >= this.termList.length) {
+                return
+            }
+            const tab = this.termList[index]
+            if (!tab) {
+                return
+            }
+            this.currentTerm = tab.name
+            this.currentTermIndex = index
+            this.$store.commit('SET_TAB', tab)
+            document.title = tab.label ? `${tab.label} - WebSSH` : 'WebSSH'
+            const term = this.getTermRef(tab.name)
+            if (term !== null) {
+                term.setSSH()
+                this.$nextTick(() => this.activateCurrentTerm())
+            }
+        },
+        handleGlobalShortcut(event) {
+            const typing = this.isTypingTarget(event.target)
+            const key = String(event.key || '').toLowerCase()
+            const accelKey = event.ctrlKey || event.metaKey
+
+            // Alt+1..9：切换到第 N 个 tab（无须 Shift/Ctrl）
+            if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && /^[1-9]$/.test(event.key)) {
+                if (this.termList.length === 0) {
+                    return
+                }
+                event.preventDefault()
+                event.stopPropagation()
+                this.switchToTabByIndex(Number(event.key) - 1)
+                return
+            }
+
+            // 以下快捷键仅在非普通输入焦点下生效；xterm 终端例外（它吃不到 Ctrl+Shift+... 我们主动接管）。
+            if (typing === true) {
+                return
+            }
+
+            if (accelKey && event.shiftKey && key === 'w') {
+                if (this.termList.length === 0 || !this.currentTerm) {
+                    return
+                }
+                event.preventDefault()
+                event.stopPropagation()
+                this.removeTab(this.currentTerm)
+                return
+            }
+
+            if (accelKey && event.shiftKey && key === 'f') {
+                event.preventDefault()
+                event.stopPropagation()
+                window.dispatchEvent(new Event('toggle-file-browser'))
+                return
+            }
         }
     },
     beforeDestroy() {
         if (this.sortableInstance !== null) {
             this.sortableInstance.destroy()
             this.sortableInstance = null
+        }
+        if (this.shortcutHandler !== null) {
+            window.removeEventListener('keydown', this.shortcutHandler, true)
+            this.shortcutHandler = null
         }
     }
 }

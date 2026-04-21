@@ -16,8 +16,34 @@ var wcMu sync.RWMutex
 
 // WriteCounter 记录单个上传任务已写入的字节数。
 type WriteCounter struct {
-	Total int
-	Id    string
+	Total    int
+	Id       string
+	progress chan struct{}
+	closeMu  sync.Mutex
+	closed   bool
+}
+
+// NewWriteCounter 创建带进度通知 channel 的计数器。
+func NewWriteCounter(id string) *WriteCounter {
+	return &WriteCounter{
+		Id:       id,
+		progress: make(chan struct{}, 1),
+	}
+}
+
+// Progress 返回进度事件通道；计数器被移除时通道关闭。
+func (wc *WriteCounter) Progress() <-chan struct{} {
+	return wc.progress
+}
+
+func (wc *WriteCounter) closeProgress() {
+	wc.closeMu.Lock()
+	defer wc.closeMu.Unlock()
+	if wc.closed || wc.progress == nil {
+		return
+	}
+	wc.closed = true
+	close(wc.progress)
 }
 
 func AddWriteCounter(counter *WriteCounter) {
@@ -27,18 +53,31 @@ func AddWriteCounter(counter *WriteCounter) {
 }
 
 func RemoveWriteCounter(id string) {
+	var target *WriteCounter
 	wcMu.Lock()
-	defer wcMu.Unlock()
-	if len(WcList) < 2 {
-		WcList = nil
-		return
-	}
 	for i := 0; i < len(WcList); i++ {
 		if WcList[i].Id == id {
+			target = WcList[i]
 			WcList = append(WcList[:i], WcList[i+1:]...)
 			break
 		}
 	}
+	wcMu.Unlock()
+	if target != nil {
+		target.closeProgress()
+	}
+}
+
+// FindWriteCounter 按 id 查找当前活跃的计数器，找不到返回 nil。
+func FindWriteCounter(id string) *WriteCounter {
+	wcMu.RLock()
+	defer wcMu.RUnlock()
+	for _, v := range WcList {
+		if v.Id == id {
+			return v
+		}
+	}
+	return nil
 }
 
 func SnapshotWriteCounters() []*WriteCounter {
@@ -56,6 +95,12 @@ func SnapshotWriteCounters() []*WriteCounter {
 func (wc *WriteCounter) Write(p []byte) (int, error) {
 	n := len(p)
 	wc.Total += n
+	if wc.progress != nil {
+		select {
+		case wc.progress <- struct{}{}:
+		default:
+		}
+	}
 	return n, nil
 }
 

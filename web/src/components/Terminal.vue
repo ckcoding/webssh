@@ -28,7 +28,10 @@ export default {
             resizeHandler: null,
             resizeSyncTimer: null,
             wheelEventName: '',
-            wheelHandler: null
+            wheelHandler: null,
+            autoReconnectAttempts: 0,
+            autoReconnectTimer: null,
+            autoReconnectMax: 6
         }
     },
     mounted() {
@@ -108,6 +111,12 @@ export default {
                 // 浏览器或权限拒绝时交给默认行为兜底。
             })
             return true
+        },
+        isMacCommandPaste(event) {
+            const platform = navigator.userAgentData && Array.isArray(navigator.userAgentData.platform)
+                ? navigator.userAgentData.platform.join(' ')
+                : (navigator.platform || navigator.userAgent || '')
+            return /mac|iphone|ipad|ipod/i.test(platform) && event.metaKey && !event.ctrlKey && !event.shiftKey
         },
         adjustFontSize(delta) {
             const nextSize = Math.max(11, Math.min(28, this.fontSize + delta))
@@ -235,6 +244,8 @@ export default {
                 if (self.ws !== activeWs) {
                     return
                 }
+                self.cancelAutoReconnect()
+                self.autoReconnectAttempts = 0
                 self.connected()
                 self.sendResize()
                 self.focusTerminal()
@@ -247,23 +258,13 @@ export default {
                     return
                 }
                 if (!self.resetClose) {
-                    if (!this.savePass) {
-                        const activeSSH = this.$store.state.sshInfo || {}
-                        const closedSSH = this.ssh || this.reconnectSSH
-                        if (closedSSH !== null && isSameSSH(activeSSH, closedSSH)) {
-                            this.$store.commit('SET_PASS', '')
-                        }
-                    }
-                    this.closeDisconnectMessage()
-                    this.disconnectMessage = this.$message({
-                        message: this.$t('wsClose'),
-                        type: 'warning',
-                        duration: 0,
-                        showClose: true
-                    })
-                    this.reconnectReady = true
-                    this.writeReconnectPrompt()
                     this.ws = null
+                    const hadConnected = self.ssh !== null
+                    if (hadConnected && self.hasReconnectSSH() && self.autoReconnectAttempts < self.autoReconnectMax) {
+                        self.scheduleAutoReconnect()
+                        return
+                    }
+                    self.onFinalDisconnect()
                 }
                 self.resetClose = false
             }
@@ -282,42 +283,65 @@ export default {
                 }
                 const lowerKey = String(e.key || '').toLowerCase()
                 const accelKey = e.ctrlKey || e.metaKey
+                const isKeydown = e.type === 'keydown'
+                if (lowerKey === 'v' && self.isMacCommandPaste(e)) {
+                    return true
+                }
                 if (accelKey && lowerKey === 'v') {
+                    if (!isKeydown) {
+                        return false
+                    }
                     if (self.pasteClipboard()) {
                         return false
                     }
                     return true
                 }
                 if (accelKey && lowerKey === 'c' && self.term.hasSelection()) {
+                    if (!isKeydown) {
+                        return false
+                    }
                     self.copySelection()
                     return false
                 }
                 if ((e.ctrlKey || e.metaKey) && e.shiftKey && lowerKey === 'v') {
+                    if (!isKeydown) {
+                        return false
+                    }
                     if (self.pasteClipboard()) {
                         return false
                     }
                     return true
                 }
                 if ((e.ctrlKey || e.metaKey) && e.shiftKey && lowerKey === 'c' && self.term.hasSelection()) {
+                    if (!isKeydown) {
+                        return false
+                    }
                     self.copySelection()
                     return false
                 }
-                if ((e.ctrlKey || e.metaKey) && lowerKey === '=' && e.type === 'keydown') {
+                if ((e.ctrlKey || e.metaKey) && lowerKey === '=' && isKeydown) {
                     e.preventDefault()
                     self.adjustFontSize(1)
                     return false
                 }
-                if ((e.ctrlKey || e.metaKey) && lowerKey === '-' && e.type === 'keydown') {
+                if ((e.ctrlKey || e.metaKey) && lowerKey === '-' && isKeydown) {
                     e.preventDefault()
                     self.adjustFontSize(-1)
                     return false
                 }
-                if ((e.ctrlKey || e.metaKey) && lowerKey === '0' && e.type === 'keydown') {
+                if ((e.ctrlKey || e.metaKey) && lowerKey === '0' && isKeydown) {
                     e.preventDefault()
                     self.fontSize = 15
                     self.term.setOption('fontSize', self.fontSize)
                     self.fitTerminal()
                     self.sendResize()
+                    return false
+                }
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey && lowerKey === 'l' && isKeydown) {
+                    e.preventDefault()
+                    if (self.term !== null) {
+                        self.term.clear()
+                    }
                     return false
                 }
             })
@@ -336,6 +360,57 @@ export default {
         },
         hasReconnectSSH() {
             return this.reconnectSSH !== null && this.reconnectSSH.password !== undefined && this.reconnectSSH.password !== ''
+        },
+        cancelAutoReconnect() {
+            if (this.autoReconnectTimer !== null) {
+                window.clearTimeout(this.autoReconnectTimer)
+                this.autoReconnectTimer = null
+            }
+        },
+        scheduleAutoReconnect() {
+            this.cancelAutoReconnect()
+            this.autoReconnectAttempts += 1
+            const attempt = this.autoReconnectAttempts
+            const delay = Math.min(30000, 1000 * Math.pow(2, attempt - 1))
+            const message = this.$t('terminalAutoReconnecting', { n: attempt, total: this.autoReconnectMax })
+            if (this.term !== null) {
+                this.term.write(`\r\n\u001B[33m${message}\u001B[0m\r\n`)
+            }
+            this.autoReconnectTimer = window.setTimeout(() => {
+                this.autoReconnectTimer = null
+                if (!this.hasReconnectSSH()) {
+                    this.onFinalDisconnect()
+                    return
+                }
+                const snapshot = Object.assign({}, this.reconnectSSH)
+                this.$store.commit('SET_SSH', snapshot)
+                this.$nextTick(() => {
+                    this.createTerm()
+                })
+            }, delay)
+        },
+        onFinalDisconnect() {
+            this.cancelAutoReconnect()
+            const exhausted = this.autoReconnectAttempts >= this.autoReconnectMax
+            this.autoReconnectAttempts = 0
+            if (!this.savePass) {
+                const activeSSH = this.$store.state.sshInfo || {}
+                const closedSSH = this.ssh || this.reconnectSSH
+                if (closedSSH !== null && isSameSSH(activeSSH, closedSSH)) {
+                    this.$store.commit('SET_PASS', '')
+                }
+            }
+            this.closeDisconnectMessage()
+            this.disconnectMessage = this.$message({
+                message: exhausted
+                    ? this.$t('terminalAutoReconnectFailed', { total: this.autoReconnectMax })
+                    : this.$t('wsClose'),
+                type: 'warning',
+                duration: 0,
+                showClose: true
+            })
+            this.reconnectReady = true
+            this.writeReconnectPrompt()
         },
         writeReconnectPrompt() {
             if (this.term === null) {
@@ -372,6 +447,7 @@ export default {
             this.$store.commit('SET_LIST', encodeSSHList(sshList))
         },
         close() {
+            this.cancelAutoReconnect()
             const termWeb = document.getElementById(this.id)
             if (termWeb !== null && this.wheelEventName !== '' && this.wheelHandler !== null) {
                 termWeb.removeEventListener(this.wheelEventName, this.wheelHandler)

@@ -203,6 +203,9 @@ func main() {
 		file.POST("/mkdir", func(c *gin.Context) {
 			c.JSON(200, controller.CreateDirectory(c))
 		})
+		file.POST("/rename", func(c *gin.Context) {
+			c.JSON(200, controller.RenameEntry(c))
+		})
 	}
 	ssh := authGroup.Group("/ssh")
 	{

@@ -14,6 +14,7 @@ import (
 	"webssh/core"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 // File 表示远端文件列表中的单个条目。
@@ -27,6 +28,12 @@ type File struct {
 type createEntryRequest struct {
 	Path    string `json:"path"`
 	Name    string `json:"name"`
+	SshInfo string `json:"sshInfo"`
+}
+
+type renameEntryRequest struct {
+	Path    string `json:"path"`
+	NewName string `json:"newName"`
 	SshInfo string `json:"sshInfo"`
 }
 
@@ -270,38 +277,77 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer wsConn.Close()
-	id := c.Query("id")
+	id := strings.TrimSpace(c.Query("id"))
+	if id == "" {
+		return &responseBody
+	}
 
-	var ready, find bool
-	for {
-		counters := core.SnapshotWriteCounters()
-		if !ready && len(counters) == 0 {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		for _, v := range counters {
-			if v.Id == id {
-				if err := wsConn.WriteMessage(1, []byte(strconv.Itoa(v.Total))); err != nil {
-					responseBody.Msg = err.Error()
-					return &responseBody
-				}
-				find = true
-				if !ready {
-					ready = true
-				}
-				break
+	// 监听客户端断开：任何 read 错误（关闭、ping 失败）都会触发退出。
+	clientClosed := make(chan struct{})
+	go func() {
+		defer close(clientClosed)
+		for {
+			if _, _, err := wsConn.NextReader(); err != nil {
+				return
 			}
 		}
-		if ready && !find {
+	}()
+
+	// 上传协程可能稍晚注册计数器；等待最多 2 秒。
+	var counter *core.WriteCounter
+	waitDeadline := time.Now().Add(2 * time.Second)
+	for counter == nil {
+		counter = core.FindWriteCounter(id)
+		if counter != nil {
 			break
 		}
-
-		if ready {
-			time.Sleep(300 * time.Millisecond)
-			find = false
+		if time.Now().After(waitDeadline) {
+			return &responseBody
+		}
+		select {
+		case <-clientClosed:
+			return &responseBody
+		case <-c.Request.Context().Done():
+			return &responseBody
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	return &responseBody
+
+	writeTotal := func() error {
+		_ = wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return wsConn.WriteMessage(websocket.TextMessage, []byte(strconv.Itoa(counter.Total)))
+	}
+
+	if err := writeTotal(); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	// 最多 1 秒发一次心跳，防止静默连接被代理关闭。
+	heartbeat := time.NewTicker(1 * time.Second)
+	defer heartbeat.Stop()
+
+	progress := counter.Progress()
+	for {
+		select {
+		case <-clientClosed:
+			return &responseBody
+		case <-c.Request.Context().Done():
+			return &responseBody
+		case _, ok := <-progress:
+			if err := writeTotal(); err != nil {
+				return &responseBody
+			}
+			if !ok {
+				// 计数器被移除，上传已收尾，写一次最终值后退出。
+				return &responseBody
+			}
+		case <-heartbeat.C:
+			if err := writeTotal(); err != nil {
+				return &responseBody
+			}
+		}
+	}
 }
 
 // FileList 获取文件列表
@@ -507,6 +553,62 @@ func CreateDirectory(c *gin.Context) *ResponseBody {
 
 	responseBody.Data = map[string]interface{}{
 		"path": targetPath,
+	}
+	return &responseBody
+}
+
+// RenameEntry 重命名文件或目录（同级重命名，不跨目录）
+func RenameEntry(c *gin.Context) *ResponseBody {
+	var (
+		err error
+		req renameEntryRequest
+	)
+	responseBody := ResponseBody{Msg: "success"}
+	defer TimeCost(time.Now(), &responseBody)
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	oldPath := normalizeRemotePath(req.Path)
+	if oldPath == "" || oldPath == "/" {
+		responseBody.Msg = "invalid source path"
+		return &responseBody
+	}
+
+	cleanName, err := sanitizeCreateName(req.NewName)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	parentDir := pathpkg.Dir(oldPath)
+	if parentDir == "" {
+		parentDir = "/"
+	}
+	newPath := pathpkg.Join(parentDir, cleanName)
+	if newPath == oldPath {
+		responseBody.Msg = "new name is the same as the current name"
+		return &responseBody
+	}
+
+	session, err := core.GetFileSession(req.SshInfo)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+	err = session.Use(func(sshClient *core.SSHClient) error {
+		return sshClient.Rename(oldPath, newPath)
+	})
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
+
+	responseBody.Data = map[string]interface{}{
+		"oldPath": oldPath,
+		"path":    newPath,
 	}
 	return &responseBody
 }

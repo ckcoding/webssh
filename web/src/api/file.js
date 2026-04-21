@@ -30,3 +30,7 @@ export function createFile(data) {
 export function createDirectory(data) {
     return request.post('/file/mkdir', data)
 }
+
+export function renameEntry(data) {
+    return request.post('/file/rename', data)
+}

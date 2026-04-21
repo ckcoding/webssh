@@ -2,7 +2,8 @@
     <el-dialog
         :visible.sync="visible"
         width="480px"
-        custom-class="shortcuts-dialog"
+        top="0"
+        custom-class="shortcuts-dialog centered-dialog"
         :close-on-click-modal="true"
         append-to-body>
         <div slot="title" class="shortcuts-header">
@@ -10,6 +11,27 @@
             <span>{{ $t('keyboardShortcuts') || '键盘快捷键' }}</span>
         </div>
         <div class="shortcuts-content">
+            <div class="shortcuts-section">
+                <div class="section-title">{{ $t('workspaceShortcuts') || '工作区' }}</div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Alt</kbd> + <kbd>1</kbd>..<kbd>9</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('switchTabByIndex') || '切换到第 N 个标签' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('closeCurrentTab') || '关闭当前标签' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>F</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('toggleFileBrowser') || '打开/关闭文件浏览器' }}</div>
+                </div>
+            </div>
             <div class="shortcuts-section">
                 <div class="section-title">{{ $t('terminal') || '终端操作' }}</div>
                 <div class="shortcut-item">
@@ -23,6 +45,12 @@
                         <kbd>Ctrl</kbd> + <kbd>V</kbd>
                     </div>
                     <div class="shortcut-desc">{{ $t('paste') || '粘贴' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>L</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('clearTerminal') || '清屏（不影响远端）' }}</div>
                 </div>
                 <div class="shortcut-item">
                     <div class="shortcut-keys">
@@ -47,6 +75,33 @@
                         <kbd>Ctrl</kbd> + <kbd>滚轮</kbd>
                     </div>
                     <div class="shortcut-desc">{{ $t('zoomTerminal') || '缩放终端' }}</div>
+                </div>
+            </div>
+            <div class="shortcuts-section">
+                <div class="section-title">{{ $t('editFileTitle') || '文件编辑' }}</div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> / <kbd>Cmd</kbd> + <kbd>S</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('saveChanges') || '保存更改' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> / <kbd>Cmd</kbd> + <kbd>Z</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('undoEdit') || '撤销修改' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> / <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('redoEdit') || '重做修改' }}</div>
+                </div>
+                <div class="shortcut-item">
+                    <div class="shortcut-keys">
+                        <kbd>Ctrl</kbd> / <kbd>Cmd</kbd> + <kbd>Y</kbd>
+                    </div>
+                    <div class="shortcut-desc">{{ $t('redoEdit') || '重做修改' }}</div>
                 </div>
             </div>
         </div>
@@ -166,6 +221,15 @@ export default {
     border-radius: 16px;
     overflow: hidden;
     box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.25);
+    margin-top: 0 !important;
+
+    &.centered-dialog {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        margin: 0 !important;
+    }
 
     .el-dialog__header {
         background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);

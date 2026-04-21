@@ -15,8 +15,28 @@
             append-to-body>
             <div class="file-browser-content" v-loading="interactionLocked" :element-loading-text="loadingText" element-loading-spinner="el-icon-loading">
                 <div class="toolbar-container">
-                    <el-input v-model="currentPath" :disabled="interactionLocked" @keyup.enter.native="getFileList()" class="path-input"
-                        prefix-icon="el-icon-folder-opened"></el-input>
+                    <div class="path-area">
+                        <div v-if="!pathEditing" class="breadcrumb-bar" :class="{ 'is-locked': interactionLocked }">
+                            <i class="el-icon-folder-opened breadcrumb-icon"></i>
+                            <template v-for="(seg, index) in pathSegments">
+                                <span :key="`crumb-${index}`"
+                                    class="crumb"
+                                    :class="{ 'is-current': index === pathSegments.length - 1 }"
+                                    @click="index === pathSegments.length - 1 ? null : jumpToSegment(seg.path)">
+                                    {{ seg.label }}
+                                </span>
+                                <span v-if="index < pathSegments.length - 1" :key="`sep-${index}`" class="crumb-sep">›</span>
+                            </template>
+                            <i class="el-icon-edit crumb-edit" :title="$t('editPath')" @click="enterPathEditing"></i>
+                        </div>
+                        <el-input v-else v-model="currentPath" ref="pathInput"
+                            :disabled="interactionLocked"
+                            @keyup.enter.native="submitPathEditing"
+                            @keyup.esc.native="cancelPathEditing"
+                            @blur="submitPathEditing"
+                            class="path-input"
+                            prefix-icon="el-icon-folder-opened"></el-input>
+                    </div>
 
                     <div class="btns-wrapper">
                         <el-button-group>
@@ -100,12 +120,15 @@
                             <span class="time-text">{{ scope.row.ModifyTime }}</span>
                         </template>
                     </el-table-column>
-                    <el-table-column :label="$t('Actions')" width="170" align="center">
+                    <el-table-column :label="$t('Actions')" width="210" align="center">
                         <template slot-scope="scope">
                             <template v-if="scope.row.IsDir">
                                 <el-button type="text" size="mini" :icon="scope.row.IsParentNav ? 'el-icon-top' : 'el-icon-right'" :disabled="interactionLocked"
                                     @click.stop="rowClick(scope.row)" class="action-btn open-action"
                                     :title="$t('Open')"></el-button>
+                                <el-button v-if="!scope.row.IsParentNav" type="text" size="mini" icon="el-icon-edit-outline"
+                                    :disabled="interactionLocked" @click.stop="handleRename(scope.row)"
+                                    class="action-btn rename-action" :title="$t('Rename')"></el-button>
                             </template>
                             <template v-else>
                                 <el-button v-if="isEditableFile(scope.row)" type="text" size="mini" icon="el-icon-edit"
@@ -121,6 +144,9 @@
                                 <el-button type="text" size="mini" icon="el-icon-download"
                                     :disabled="interactionLocked" @click.stop="downloadFileDirect(scope.row)"
                                     :title="$t('Download')" class="action-btn download-action"></el-button>
+                                <el-button type="text" size="mini" icon="el-icon-edit-outline"
+                                    :disabled="interactionLocked" @click.stop="handleRename(scope.row)"
+                                    class="action-btn rename-action" :title="$t('Rename')"></el-button>
                             </template>
                         </template>
                     </el-table-column>
@@ -228,7 +254,7 @@
 
 <script>
 import { MessageBox } from 'element-ui'
-import { fileList, getFileContent, saveFileContent, createFile as createRemoteFile, createDirectory as createRemoteDirectory } from '@/api/file'
+import { fileList, getFileContent, saveFileContent, createFile as createRemoteFile, createDirectory as createRemoteDirectory, renameEntry as renameRemoteEntry } from '@/api/file'
 import { mapState } from 'vuex'
 
 const DIRECTORY_CACHE_TTL = 10 * 1000
@@ -361,7 +387,9 @@ export default {
                 id: '',
                 dir: ''
             },
+            editorShortcutHandler: null,
             resizeHandler: null,
+            toggleFileBrowserHandler: null,
             loading: false,
             editorVisible: false,
             editorLoading: false,
@@ -381,6 +409,7 @@ export default {
             editingFilePath: '',
             createLoading: false,
             createTargetType: '',
+            renaming: false,
             lineCount: 1,
             activeUploads: 0,
             listRequestToken: 0,
@@ -388,7 +417,9 @@ export default {
             listAbortController: null,
             editorAbortController: null,
             uploadRefreshTimer: null,
-            uploadProgressSockets: {}
+            uploadProgressSockets: {},
+            pathEditing: false,
+            pathDraftBeforeEditing: ''
         }
     },
     created() {
@@ -396,15 +427,37 @@ export default {
     },
     mounted() {
         this.resizeDialog()
+        this.editorShortcutHandler = (event) => {
+            this.handleEditorShortcut(event)
+        }
         this.resizeHandler = () => {
             this.resizeDialog()
         }
+        this.toggleFileBrowserHandler = () => {
+            this.toggleFileBrowser()
+        }
+        window.addEventListener('keydown', this.editorShortcutHandler, true)
         window.addEventListener('resize', this.resizeHandler)
+        window.addEventListener('toggle-file-browser', this.toggleFileBrowserHandler)
     },
     computed: {
         ...mapState(['currentTab']),
         hasActiveConnection() {
             return Boolean(this.currentTab && this.currentTab.name)
+        },
+        pathSegments() {
+            const normalized = normalizePath(this.currentPath)
+            const segments = [{ label: '/', path: '/' }]
+            if (normalized === '/') {
+                return segments
+            }
+            const parts = normalized.split('/').filter(Boolean)
+            let cumulative = ''
+            parts.forEach((part) => {
+                cumulative += `/${part}`
+                segments.push({ label: part, path: cumulative })
+            })
+            return segments
         },
         displayFileList() {
             const parentEntry = createParentDirectoryEntry(this.currentPath)
@@ -414,11 +467,14 @@ export default {
             return [parentEntry, ...this.fileList]
         },
         interactionLocked() {
-            return this.loading || this.editorLoading || this.saveLoading || this.previewLoading || this.createLoading || this.activeUploads > 0
+            return this.loading || this.editorLoading || this.saveLoading || this.previewLoading || this.createLoading || this.renaming || this.activeUploads > 0
         },
         loadingText() {
             if (this.activeUploads > 0) {
                 return this.$t('uploadingFiles')
+            }
+            if (this.renaming) {
+                return this.$t('renamingEntry')
             }
             if (this.createLoading) {
                 return this.$t(this.createTargetType === 'folder' ? 'creatingFolder' : 'creatingFile')
@@ -450,6 +506,7 @@ export default {
         currentTab: function () {
             this.cancelListRequest()
             this.fileList = []
+            this.pathEditing = false
             this.currentPath = normalizePath(this.currentTab && this.currentTab.path)
             const cached = this.getDirectoryCache(this.currentPath)
             if (cached !== null) {
@@ -466,9 +523,59 @@ export default {
                 return
             }
             this.currentPath = normalizePath(this.currentTab && this.currentTab.path)
+            this.pathEditing = false
             this.dialogVisible = true
             this.warmupMonaco()
             this.getFileList({ clearBeforeLoad: true })
+        },
+        toggleFileBrowser() {
+            if (this.interactionLocked) {
+                return
+            }
+            if (this.dialogVisible) {
+                this.dialogVisible = false
+                return
+            }
+            this.openFileBrowser()
+        },
+        jumpToSegment(path) {
+            if (this.interactionLocked) {
+                return
+            }
+            const target = normalizePath(path)
+            if (target === normalizePath(this.currentPath)) {
+                return
+            }
+            this.currentPath = target
+            this.getFileList({ clearBeforeLoad: true })
+        },
+        enterPathEditing() {
+            if (this.interactionLocked) {
+                return
+            }
+            this.pathDraftBeforeEditing = this.currentPath
+            this.pathEditing = true
+            this.$nextTick(() => {
+                const input = this.$refs.pathInput
+                if (input && typeof input.focus === 'function') {
+                    input.focus()
+                }
+            })
+        },
+        submitPathEditing() {
+            if (!this.pathEditing) {
+                return
+            }
+            this.pathEditing = false
+            if (normalizePath(this.currentPath) === normalizePath(this.pathDraftBeforeEditing)) {
+                this.currentPath = normalizePath(this.currentPath)
+                return
+            }
+            this.getFileList({ clearBeforeLoad: true })
+        },
+        cancelPathEditing() {
+            this.currentPath = this.pathDraftBeforeEditing
+            this.pathEditing = false
         },
         handleMainDialogBeforeClose(done) {
             if (this.interactionLocked) {
@@ -564,6 +671,49 @@ export default {
                     this.$refs.fallbackEditor.focus()
                 }
             })
+        },
+        handleEditorShortcut(event) {
+            const accelKey = event.ctrlKey || event.metaKey
+            const lowerKey = String(event.key || '').toLowerCase()
+            const isSave = !event.shiftKey && lowerKey === 's'
+            const isUndo = !event.shiftKey && lowerKey === 'z'
+            const isRedo = lowerKey === 'y' || (event.shiftKey && lowerKey === 'z')
+            if (!this.editorVisible || !accelKey || (!isSave && !isUndo && !isRedo)) {
+                return
+            }
+            event.preventDefault()
+            event.stopPropagation()
+            if (this.editorLoading || this.editingFilePath === '') {
+                return
+            }
+            if (isSave) {
+                if (this.saveLoading || !this.hasUnsavedEditorChanges()) {
+                    return
+                }
+                this.saveContent()
+                return
+            }
+            if (this.saveLoading) {
+                return
+            }
+            this.runEditorCommand(isUndo ? 'undo' : 'redo')
+        },
+        runEditorCommand(command) {
+            if (this.editorMode === 'monaco' && this.monacoEditor) {
+                this.monacoEditor.focus()
+                this.monacoEditor.trigger('keyboard', command, null)
+                this.editingContent = this.monacoEditor.getValue()
+                return
+            }
+            const textarea = this.$refs.fallbackEditor
+            if (!textarea) {
+                return
+            }
+            textarea.focus()
+            if (typeof document.execCommand === 'function') {
+                document.execCommand(command)
+                this.editingContent = textarea.value
+            }
         },
         loadMonaco() {
             if (window.monaco) {
@@ -853,6 +1003,49 @@ export default {
             }
             if (createdRow !== null) {
                 this.openEditor(createdRow)
+            }
+        },
+        async handleRename(row) {
+            if (this.interactionLocked || !row || row.IsParentNav) {
+                return
+            }
+            const oldName = String(row.Name || '')
+            const result = await MessageBox.prompt('', this.$t('renameTitle'), {
+                closeOnClickModal: false,
+                closeOnPressEscape: false,
+                inputValue: oldName,
+                inputValidator: value => this.validateCreateName(value),
+                inputErrorMessage: this.$t(row.IsDir ? 'invalidFolderName' : 'invalidFileName'),
+                confirmButtonText: this.$t('Rename'),
+                cancelButtonText: this.$t('Cancel')
+            }).catch(() => null)
+            if (!result || typeof result.value !== 'string') {
+                return
+            }
+            const newName = result.value.trim()
+            if (newName === oldName) {
+                return
+            }
+            const oldPath = this.buildFilePath(row)
+            this.renaming = true
+            try {
+                const res = await renameRemoteEntry({
+                    path: oldPath,
+                    newName,
+                    sshInfo: this.$store.getters.sshReq
+                })
+                if (res.Msg !== 'success') {
+                    this.$message.error(`${this.$t('renameFailed')}: ${res.Msg}`)
+                    return
+                }
+                this.invalidateFileContentCache(oldPath)
+                this.invalidateDirectoryCache(this.currentPath)
+                await this.getFileList({ force: true })
+                this.$message.success(this.$t('renameSuccess'))
+            } catch (e) {
+                this.$message.error(this.$t('networkRequestFailed'))
+            } finally {
+                this.renaming = false
             }
         },
         openUploadDialog() {
@@ -1263,9 +1456,17 @@ export default {
     beforeDestroy() {
         this.cancelListRequest()
         this.cancelEditorRequest()
+        if (this.editorShortcutHandler !== null) {
+            window.removeEventListener('keydown', this.editorShortcutHandler, true)
+            this.editorShortcutHandler = null
+        }
         if (this.resizeHandler !== null) {
             window.removeEventListener('resize', this.resizeHandler)
             this.resizeHandler = null
+        }
+        if (this.toggleFileBrowserHandler !== null) {
+            window.removeEventListener('toggle-file-browser', this.toggleFileBrowserHandler)
+            this.toggleFileBrowserHandler = null
         }
         if (this.uploadRefreshTimer !== null) {
             clearTimeout(this.uploadRefreshTimer)
@@ -1431,6 +1632,83 @@ export default {
         gap: 10px;
         width: 100%;
         margin-bottom: 14px;
+
+        .path-area {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .breadcrumb-bar {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 4px 6px;
+            min-height: 36px;
+            padding: 4px 10px;
+            background: #f8fafc;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 10px;
+            color: #334155;
+            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+            font-size: 12.5px;
+
+            .breadcrumb-icon {
+                color: #64748b;
+                font-size: 16px;
+                margin-right: 4px;
+                flex-shrink: 0;
+            }
+
+            .crumb {
+                padding: 2px 8px;
+                border-radius: 6px;
+                cursor: pointer;
+                color: #475569;
+                transition: background 0.15s, color 0.15s;
+                white-space: nowrap;
+
+                &:hover {
+                    background: rgba(59, 130, 246, 0.1);
+                    color: #2563eb;
+                }
+
+                &.is-current {
+                    background: rgba(59, 130, 246, 0.12);
+                    color: #1e40af;
+                    font-weight: 600;
+                    cursor: default;
+                }
+            }
+
+            .crumb-sep {
+                color: #94a3b8;
+                font-weight: 600;
+                user-select: none;
+            }
+
+            .crumb-edit {
+                margin-left: auto;
+                padding: 4px 6px;
+                border-radius: 6px;
+                color: #94a3b8;
+                cursor: pointer;
+                font-size: 14px;
+
+                &:hover {
+                    background: rgba(59, 130, 246, 0.1);
+                    color: #2563eb;
+                }
+            }
+
+            &.is-locked {
+                opacity: 0.75;
+
+                .crumb,
+                .crumb-edit {
+                    cursor: not-allowed;
+                }
+            }
+        }
 
         .path-input {
             flex: 1;
@@ -1676,6 +1954,14 @@ export default {
                 &:hover {
                     background: rgba(59, 130, 246, 0.1) !important;
                     color: #3b82f6 !important;
+                }
+            }
+
+            &.rename-action {
+                color: #f59e0b !important;
+                &:hover {
+                    background: rgba(245, 158, 11, 0.12) !important;
+                    color: #d97706 !important;
                 }
             }
 

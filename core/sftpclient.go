@@ -63,6 +63,22 @@ func (sclient *SSHClient) CreateEmptyFile(dstPath string) error {
 	return dstFile.Close()
 }
 
+// Rename 重命名文件/文件夹。若目标已存在则失败（SFTP Rename 不覆盖）。
+func (sclient *SSHClient) Rename(oldPath, newPath string) error {
+	if _, err := sclient.Sftp.Lstat(oldPath); err != nil {
+		if isSFTPNotExist(err) {
+			return fmt.Errorf("source path does not exist")
+		}
+		return err
+	}
+	if _, err := sclient.Sftp.Lstat(newPath); err == nil {
+		return fmt.Errorf("path already exists")
+	} else if !isSFTPNotExist(err) {
+		return err
+	}
+	return sclient.Sftp.Rename(oldPath, newPath)
+}
+
 // Upload 上传文件
 func (sclient *SSHClient) Upload(file multipart.File, id, dstPath string) error {
 	dstFile, err := sclient.Sftp.Create(dstPath)
@@ -73,9 +89,9 @@ func (sclient *SSHClient) Upload(file multipart.File, id, dstPath string) error 
 	defer func() {
 		RemoveWriteCounter(id)
 	}()
-	wc := WriteCounter{Id: id}
-	AddWriteCounter(&wc)
-	_, err = io.Copy(dstFile, io.TeeReader(file, &wc))
+	wc := NewWriteCounter(id)
+	AddWriteCounter(wc)
+	_, err = io.Copy(dstFile, io.TeeReader(file, wc))
 	if err != nil {
 		return err
 	}

@@ -10,7 +10,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const systemInfoStreamInterval = 5 * time.Second
+const (
+	systemInfoStreamInterval = 5 * time.Second
+	systemInfoKeepaliveEvery = 15 * time.Second
+)
 
 func collectSSHSystemInfo(sshInfo string) (core.SSHSystemInfo, error) {
 	session, err := core.GetCommandSession(sshInfo)
@@ -102,6 +105,8 @@ func StreamSSHSystemInfo(c *gin.Context) {
 
 	ticker := time.NewTicker(systemInfoStreamInterval)
 	defer ticker.Stop()
+	keepalive := time.NewTicker(systemInfoKeepaliveEvery)
+	defer keepalive.Stop()
 
 	for {
 		select {
@@ -111,6 +116,12 @@ func StreamSSHSystemInfo(c *gin.Context) {
 			if err := sendSnapshot(); err != nil {
 				return
 			}
+		case <-keepalive.C:
+			// SSE 注释行，客户端忽略，只为维持反向代理和 HTTP/1.1 连接不被缓冲/超时。
+			if _, err := fmt.Fprint(c.Writer, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }

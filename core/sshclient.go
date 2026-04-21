@@ -94,12 +94,9 @@ func (sclient *SSHClient) GenerateClient() error {
 	config = ssh.Config{
 		Ciphers: []string{
 			"aes128-gcm@openssh.com",
+			"aes256-gcm@openssh.com",
 			"chacha20-poly1305@openssh.com",
 			"aes128-ctr", "aes192-ctr", "aes256-ctr",
-			"aes256-gcm@openssh.com",
-			"arcfour256", "arcfour128",
-			"aes128-cbc", "3des-cbc",
-			"aes192-cbc", "aes256-cbc",
 		},
 		KeyExchanges: []string{
 			"curve25519-sha256",
@@ -109,8 +106,6 @@ func (sclient *SSHClient) GenerateClient() error {
 			"ecdh-sha2-nistp521",
 			"diffie-hellman-group-exchange-sha256",
 			"diffie-hellman-group14-sha256",
-			"diffie-hellman-group14-sha1",
-			"diffie-hellman-group1-sha1",
 		},
 	}
 	clientConfig = &ssh.ClientConfig{
@@ -160,11 +155,11 @@ func (sclient *SSHClient) InitTerminal(ws *websocket.Conn, rows, cols int) *SSHC
 	sclient.wsOutput = wsOutput
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
+		ssh.TTY_OP_ISPEED: 115200,
+		ssh.TTY_OP_OSPEED: 115200,
 	}
 
-	if err := sshSession.RequestPty("xterm", rows, cols, modes); err != nil {
+	if err := sshSession.RequestPty("xterm-256color", rows, cols, modes); err != nil {
 		return nil
 	}
 	if err := sshSession.Shell(); err != nil {
