@@ -2,12 +2,16 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"html"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -23,10 +27,12 @@ var f embed.FS
 
 var (
 	port       = flag.Int("p", 5032, "服务运行端口")
+	basePathF  = flag.String("b", "", "服务根路径前缀, 如 /webssh")
 	v          = flag.Bool("v", false, "显示版本号")
 	authInfo   = flag.String("a", "", "开启账号密码登录验证, '-a user:pass'的格式传参")
 	timeout    int
 	savePass   bool
+	basePath   string
 	version    string
 	buildDate  string
 	goVersion  string
@@ -36,26 +42,152 @@ var (
 )
 
 var sessionToken = func() string {
-	b := make([]byte, 16)
-	rand.Read(b)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Errorf("generate session token: %w", err))
+	}
 	return hex.EncodeToString(b)
 }()
+
+var sensitiveLogQueryKeys = map[string]struct{}{
+	"auth":          {},
+	"authorization": {},
+	"pass":          {},
+	"password":      {},
+	"sessionid":     {},
+	"sshinfo":       {},
+	"token":         {},
+}
+
+func normalizeBasePath(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "/" {
+		return ""
+	}
+	return "/" + strings.Trim(trimmed, "/")
+}
+
+func joinBasePath(prefix, path string) string {
+	normalizedPrefix := normalizeBasePath(prefix)
+	if path == "" || path == "/" {
+		if normalizedPrefix == "" {
+			return "/"
+		}
+		return normalizedPrefix + "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if normalizedPrefix == "" {
+		return path
+	}
+	return normalizedPrefix + path
+}
+
+func cookiePath(prefix string) string {
+	if normalizeBasePath(prefix) == "" {
+		return "/"
+	}
+	return normalizeBasePath(prefix)
+}
+
+var indexHTMLCache []byte
+
+func buildIndexHTML(prefix string) []byte {
+	if indexHTMLCache != nil {
+		return indexHTMLCache
+	}
+	indexHTML, err := f.ReadFile("web/dist/index.html")
+	if err != nil {
+		panic(err)
+	}
+	indexHTMLCache = []byte(strings.ReplaceAll(string(indexHTML), "__WEBSSH_BASE_PATH__", html.EscapeString(normalizeBasePath(prefix))))
+	return indexHTMLCache
+}
 
 func isAuthorized(c *gin.Context) bool {
 	if password == "" {
 		return true
 	}
-	if token, err := c.Cookie("webssh_token"); err == nil && token == sessionToken {
+	if token, err := c.Cookie("webssh_token"); err == nil && tokenMatches(token) {
 		return true
 	}
-	if strings.TrimSpace(c.Query("token")) == sessionToken {
+	if tokenMatches(strings.TrimSpace(c.Query("token"))) {
 		return true
 	}
 	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
 	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 		authHeader = strings.TrimSpace(authHeader[7:])
 	}
-	return authHeader == sessionToken
+	return tokenMatches(authHeader)
+}
+
+var sessionTokenHash [32]byte
+
+func init() {
+	sessionTokenHash = sha256.Sum256([]byte(sessionToken))
+}
+
+func tokenMatches(candidate string) bool {
+	candidateHash := sha256.Sum256([]byte(candidate))
+	return subtle.ConstantTimeCompare(candidateHash[:], sessionTokenHash[:]) == 1
+}
+
+func constantTimeStringEqual(candidate, expected string) bool {
+	candidateHash := sha256.Sum256([]byte(candidate))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(candidateHash[:], expectedHash[:]) == 1
+}
+
+func redactRequestPath(path string) string {
+	if path == "" {
+		return path
+	}
+	parsed, err := url.ParseRequestURI(path)
+	if err == nil {
+		parsed.RawQuery = redactQueryString(parsed.RawQuery)
+		return parsed.RequestURI()
+	}
+	prefix, rawQuery, ok := strings.Cut(path, "?")
+	if !ok {
+		return path
+	}
+	redactedQuery := redactQueryString(rawQuery)
+	if redactedQuery == "" {
+		return prefix
+	}
+	return prefix + "?" + redactedQuery
+}
+
+func redactQueryString(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "REDACTED_QUERY"
+	}
+	for key := range values {
+		if _, ok := sensitiveLogQueryKeys[strings.ToLower(key)]; ok {
+			values[key] = []string{"REDACTED"}
+		}
+	}
+	return values.Encode()
+}
+
+func redactingLogFormatter(param gin.LogFormatterParams) string {
+	if param.Latency > time.Minute {
+		param.Latency = param.Latency.Truncate(time.Second)
+	}
+	return fmt.Sprintf("[GIN] %v | %3d | %13v | %15s | %-7s %#v\n%s",
+		param.TimeStamp.Format("2006/01/02 - 15:04:05"),
+		param.StatusCode,
+		param.Latency,
+		param.ClientIP,
+		param.Method,
+		redactRequestPath(param.Path),
+		param.ErrorMessage,
+	)
 }
 
 func isSecureRequest(c *gin.Context) bool {
@@ -96,7 +228,16 @@ func init() {
 			*port = b
 		}
 	}
+	if envVal, ok := os.LookupEnv("basePath"); ok {
+		*basePathF = envVal
+	} else if envVal, ok := os.LookupEnv("BASE_PATH"); ok {
+		*basePathF = envVal
+	}
+}
+
+func loadRuntimeConfig() bool {
 	flag.Parse()
+	basePath = normalizeBasePath(*basePathF)
 	if *v {
 		fmt.Printf("Version: %s\n\n", version)
 		fmt.Printf("BuildDate: %s\n\n", buildDate)
@@ -105,23 +246,25 @@ func init() {
 		os.Exit(0)
 	}
 	if *authInfo != "" {
-		accountInfo := strings.Split(*authInfo, ":")
-		if len(accountInfo) != 2 || accountInfo[0] == "" || accountInfo[1] == "" {
+		accountUsername, accountPassword, ok := strings.Cut(*authInfo, ":")
+		if !ok || accountUsername == "" || accountPassword == "" {
 			fmt.Println("请按'user:pass'的格式来传参或设置环境变量, 且账号密码都不能为空!")
-			os.Exit(0)
+			return false
 		}
-		username, password = accountInfo[0], accountInfo[1]
+		username, password = accountUsername, accountPassword
 	}
+	return true
 }
 
-func staticRouter(router *gin.Engine) {
+func staticRouter(router *gin.RouterGroup, prefix string) {
+	indexHTML := buildIndexHTML(prefix)
+	staticPrefix := joinBasePath(prefix, "/static/")
 	router.GET("/", func(c *gin.Context) {
-		indexHTML, _ := f.ReadFile("web/dist/" + "index.html")
 		c.Header("Cache-Control", "no-store")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 	})
 	router.Use(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+		if strings.HasPrefix(c.Request.URL.Path, staticPrefix) {
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		c.Next()
@@ -130,9 +273,10 @@ func staticRouter(router *gin.Engine) {
 	router.StaticFS("/static", http.FS(staticFs))
 }
 
-func main() {
-	server := gin.Default()
+func newServer() *gin.Engine {
+	server := gin.New()
 	server.SetTrustedProxies(nil)
+	server.Use(gin.LoggerWithFormatter(redactingLogFormatter), gin.Recovery())
 
 	server.Use(func(c *gin.Context) {
 		c.Header("X-Content-Type-Options", "nosniff")
@@ -143,9 +287,23 @@ func main() {
 	})
 
 	server.Use(gzip.Gzip(gzip.DefaultCompression))
-	staticRouter(server)
+	if basePath != "" {
+		redirectTarget := joinBasePath(basePath, "/")
+		redirectToBase := func(c *gin.Context) {
+			target := redirectTarget
+			if rawQuery := strings.TrimSpace(c.Request.URL.RawQuery); rawQuery != "" {
+				target += "?" + rawQuery
+			}
+			c.Redirect(http.StatusPermanentRedirect, target)
+		}
+		server.GET(basePath, redirectToBase)
+		server.HEAD(basePath, redirectToBase)
+	}
+	routeGroup := server.Group(basePath)
+	staticRouter(routeGroup, basePath)
 
-	server.GET("/api/status", func(c *gin.Context) {
+	apiGroup := routeGroup.Group("/api")
+	apiGroup.GET("/status", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"auth":          password != "",
 			"authenticated": isAuthorized(c),
@@ -153,7 +311,7 @@ func main() {
 		})
 	})
 
-	server.POST("/api/login", func(c *gin.Context) {
+	apiGroup.POST("/login", func(c *gin.Context) {
 		var req struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -162,16 +320,16 @@ func main() {
 			c.JSON(400, gin.H{"Msg": "invalid request"})
 			return
 		}
-		if req.Username == username && req.Password == password {
+		if constantTimeStringEqual(req.Username, username) && constantTimeStringEqual(req.Password, password) {
 			c.SetSameSite(http.SameSiteLaxMode)
-			c.SetCookie("webssh_token", sessionToken, 3600*24*7, "/", "", isSecureRequest(c), true)
+			c.SetCookie("webssh_token", sessionToken, 3600*24*7, cookiePath(basePath), "", isSecureRequest(c), true)
 			c.JSON(200, gin.H{"Msg": "success", "token": sessionToken})
 			return
 		}
 		c.JSON(401, gin.H{"Msg": "invalid credentials"})
 	})
 
-	authGroup := server.Group("")
+	authGroup := routeGroup.Group("")
 	authGroup.Use(AuthMiddleware())
 
 	authGroup.GET("/term", func(c *gin.Context) {
@@ -212,6 +370,9 @@ func main() {
 		ssh.POST("/check", func(c *gin.Context) {
 			c.JSON(200, controller.CheckSSHConnection(c))
 		})
+		ssh.POST("/session", func(c *gin.Context) {
+			c.JSON(200, controller.CreateSSHSession(c))
+		})
 		ssh.GET("/saved", func(c *gin.Context) {
 			c.JSON(200, controller.ListSavedSSH(c))
 		})
@@ -224,14 +385,26 @@ func main() {
 		ssh.POST("/saved", func(c *gin.Context) {
 			c.JSON(200, controller.SaveSavedSSH(c))
 		})
+		ssh.POST("/saved/:id/refresh", func(c *gin.Context) {
+			c.JSON(200, controller.RefreshSavedSSHInfo(c))
+		})
 		ssh.DELETE("/saved/:id", func(c *gin.Context) {
 			c.JSON(200, controller.DeleteSavedSSH(c))
 		})
 	}
+	return server
+}
+
+func main() {
+	if !loadRuntimeConfig() {
+		return
+	}
+	server := newServer()
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", *port),
 		Handler:           server,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}

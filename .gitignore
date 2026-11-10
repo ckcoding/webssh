@@ -1,19 +1,28 @@
-# Build artifacts
-result/
+# Build output
+/webssh
+/webssh_*
+/result/
 web/dist/
 *.log
+*.pid
 
-# macOS
+# Dependencies
+web/node_modules/
+vendor/
+
+# Local config / secrets
+.env
+*.local
+ssh_profiles.json
+
+# Private deployment notes and audit output (never commit)
+/deploy*.sh
+/scripts/deploy-*.sh
+service-audit-*/
+
+# OS / IDE
 .DS_Store
-
-# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# Node
-web/node_modules/
-
-# Go
-vendor/

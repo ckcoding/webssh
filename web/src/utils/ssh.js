@@ -22,6 +22,7 @@ export function normalizeSSHInfo(sshInfo = {}) {
         os: sshInfo.os || '',
         memory: sshInfo.memory || '',
         expiresAt: sshInfo.expiresAt || '',
+        alias: sshInfo.alias || '',
         username: sshInfo.username || 'root',
         port: Number(sshInfo.port) || 22,
         logintype: sshInfo.logintype === undefined ? 0 : Number(sshInfo.logintype)

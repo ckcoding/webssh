@@ -255,10 +255,14 @@
 <script>
 import { MessageBox } from 'element-ui'
 import { fileList, getFileContent, saveFileContent, createFile as createRemoteFile, createDirectory as createRemoteDirectory, renameEntry as renameRemoteEntry } from '@/api/file'
+import { buildAppURL, buildWsURL } from '@/utils/base'
 import { mapState } from 'vuex'
 
 const DIRECTORY_CACHE_TTL = 10 * 1000
+const DIRECTORY_CACHE_MAX_ENTRIES = 80
 const FILE_CONTENT_CACHE_TTL = 30 * 1000
+const FILE_CONTENT_CACHE_MAX_ENTRIES = 12
+const FILE_CONTENT_CACHE_MAX_BYTES = 512 * 1024
 const directoryCache = new Map()
 const fileContentCache = new Map()
 let monacoLoaderPromise = null
@@ -325,11 +329,21 @@ function getCachedValue(cache, key, ttl) {
     return entry.value
 }
 
-function setCachedValue(cache, key, value) {
+function pruneCache(cache, maxEntries) {
+    if (!maxEntries || cache.size <= maxEntries) {
+        return
+    }
+    const entries = Array.from(cache.entries()).sort((left, right) => left[1].timestamp - right[1].timestamp)
+    const removeCount = cache.size - maxEntries
+    entries.slice(0, removeCount).forEach(([entryKey]) => cache.delete(entryKey))
+}
+
+function setCachedValue(cache, key, value, maxEntries) {
     cache.set(key, {
         timestamp: Date.now(),
         value
     })
+    pruneCache(cache, maxEntries)
 }
 
 function getFileExtension(name) {
@@ -372,17 +386,15 @@ export default {
             fileList: [],
             downloadFilePath: '',
             currentPath: '',
-            pathSpan: 18,
             clientHeight: 0,
             selectTip: 'clickSelectFile',
             titleTip: 'uploadFile',
             uploadTip: '',
             dialogWidth: '50%',
             uploadWidth: '32%',
-            nameWidth: 260,
-            progressPercent: 0,
             uploadData: {
                 sshInfo: '',
+                sessionId: '',
                 path: '',
                 id: '',
                 dir: ''
@@ -410,7 +422,6 @@ export default {
             createLoading: false,
             createTargetType: '',
             renaming: false,
-            lineCount: 1,
             activeUploads: 0,
             listRequestToken: 0,
             editorRequestToken: 0,
@@ -441,9 +452,15 @@ export default {
         window.addEventListener('toggle-file-browser', this.toggleFileBrowserHandler)
     },
     computed: {
-        ...mapState(['currentTab']),
+        ...mapState(['currentTab', 'connectionSessionId']),
         hasActiveConnection() {
             return Boolean(this.currentTab && this.currentTab.name)
+        },
+        sshRequestIdentity() {
+            return this.connectionSessionId ? { sessionId: this.connectionSessionId } : { sshInfo: this.$store.getters.sshReq }
+        },
+        sshCacheIdentity() {
+            return this.connectionSessionId ? `session:${this.connectionSessionId}` : `ssh:${this.$store.getters.sshReq}`
         },
         pathSegments() {
             const normalized = normalizePath(this.currentPath)
@@ -494,12 +511,8 @@ export default {
             return this.$t('loadingDirectory')
         },
         uploadUrl() {
-            const prefix = process.env.NODE_ENV === 'production' ? `${location.origin}` : 'api'
             const token = localStorage.getItem('webssh_token')
-            if (!token) {
-                return `${prefix}/file/upload`
-            }
-            return `${prefix}/file/upload?${new URLSearchParams({ token }).toString()}`
+            return buildAppURL('/file/upload', token ? { token } : null)
         }
     },
     watch: {
@@ -525,7 +538,6 @@ export default {
             this.currentPath = normalizePath(this.currentTab && this.currentTab.path)
             this.pathEditing = false
             this.dialogVisible = true
-            this.warmupMonaco()
             this.getFileList({ clearBeforeLoad: true })
         },
         toggleFileBrowser() {
@@ -640,12 +652,6 @@ export default {
         },
         hasUnsavedEditorChanges() {
             return this.editingFilePath !== '' && this.editingContent !== this.originalEditingContent
-        },
-        warmupMonaco() {
-            if (window.monaco || monacoLoaderPromise !== null) {
-                return
-            }
-            this.loadMonaco().catch(() => {})
         },
         resolveEditorMode() {
             return this.loadMonaco()
@@ -857,10 +863,13 @@ export default {
             return normalizePath(`${base}/${row.Name}`)
         },
         buildFileUrl(path, inline = false) {
-            const prefix = process.env.NODE_ENV === 'production' ? `${location.origin}` : 'api'
             const params = {
-                path,
-                sshInfo: this.$store.getters.sshReq
+                path
+            }
+            if (this.connectionSessionId) {
+                params.sessionId = this.connectionSessionId
+            } else {
+                params.sshInfo = this.$store.getters.sshReq
             }
             if (inline) {
                 params.inline = '1'
@@ -869,7 +878,7 @@ export default {
             if (token) {
                 params.token = token
             }
-            return `${prefix}/file/download?${new URLSearchParams(params).toString()}`
+            return buildAppURL('/file/download', params)
         },
         resetPreviewState() {
             this.previewVisible = false
@@ -895,31 +904,28 @@ export default {
             this.downloadFile()
         },
         getDirectoryCache(path) {
-            const sshInfo = this.$store.getters.sshReq
-            const cacheKey = buildCacheKey(sshInfo, normalizePath(path))
+            const cacheKey = buildCacheKey(this.sshCacheIdentity, normalizePath(path))
             const cached = getCachedValue(directoryCache, cacheKey, DIRECTORY_CACHE_TTL)
             return cached === null ? null : cloneFileEntries(cached)
         },
         setDirectoryCache(path, list) {
-            const sshInfo = this.$store.getters.sshReq
-            const cacheKey = buildCacheKey(sshInfo, normalizePath(path))
-            setCachedValue(directoryCache, cacheKey, cloneFileEntries(list))
+            const cacheKey = buildCacheKey(this.sshCacheIdentity, normalizePath(path))
+            setCachedValue(directoryCache, cacheKey, cloneFileEntries(list), DIRECTORY_CACHE_MAX_ENTRIES)
         },
         invalidateDirectoryCache(path) {
-            const sshInfo = this.$store.getters.sshReq
-            directoryCache.delete(buildCacheKey(sshInfo, normalizePath(path)))
+            directoryCache.delete(buildCacheKey(this.sshCacheIdentity, normalizePath(path)))
         },
         getFileContentCache(path) {
-            const sshInfo = this.$store.getters.sshReq
-            return getCachedValue(fileContentCache, buildCacheKey(sshInfo, normalizePath(path)), FILE_CONTENT_CACHE_TTL)
+            return getCachedValue(fileContentCache, buildCacheKey(this.sshCacheIdentity, normalizePath(path)), FILE_CONTENT_CACHE_TTL)
         },
         setFileContentCache(path, content) {
-            const sshInfo = this.$store.getters.sshReq
-            setCachedValue(fileContentCache, buildCacheKey(sshInfo, normalizePath(path)), content)
+            if (String(content || '').length > FILE_CONTENT_CACHE_MAX_BYTES) {
+                return
+            }
+            setCachedValue(fileContentCache, buildCacheKey(this.sshCacheIdentity, normalizePath(path)), content, FILE_CONTENT_CACHE_MAX_ENTRIES)
         },
         invalidateFileContentCache(path) {
-            const sshInfo = this.$store.getters.sshReq
-            fileContentCache.delete(buildCacheKey(sshInfo, normalizePath(path)))
+            fileContentCache.delete(buildCacheKey(this.sshCacheIdentity, normalizePath(path)))
         },
         scheduleDirectoryRefresh(path = this.currentPath) {
             const targetPath = normalizePath(path)
@@ -983,7 +989,7 @@ export default {
                 const res = await action({
                     path: this.currentPath,
                     name,
-                    sshInfo: this.$store.getters.sshReq
+                    ...this.sshRequestIdentity
                 })
                 if (res.Msg !== 'success') {
                     this.$message.error(`${this.$t(type === 'folder' ? 'createFolderFailed' : 'createFileFailed')}: ${res.Msg}`)
@@ -1032,7 +1038,7 @@ export default {
                 const res = await renameRemoteEntry({
                     path: oldPath,
                     newName,
-                    sshInfo: this.$store.getters.sshReq
+                    ...this.sshRequestIdentity
                 })
                 if (res.Msg !== 'success') {
                     this.$message.error(`${this.$t('renameFailed')}: ${res.Msg}`)
@@ -1051,7 +1057,8 @@ export default {
         openUploadDialog() {
             this.uploadTip = `${this.$t('uploadPath')}: ${this.currentPath}`
             this.uploadData = {
-                sshInfo: this.$store.getters.sshReq,
+                sshInfo: this.connectionSessionId ? '' : this.$store.getters.sshReq,
+                sessionId: this.connectionSessionId,
                 path: this.currentPath,
                 id: '',
                 dir: ''
@@ -1091,7 +1098,8 @@ export default {
         beforeUpload(file) {
             this.activeUploads += 1
             this.uploadTip = `${this.$t('uploading')} ${file.name} ${this.$t('to')} ${this.currentPath}, ${this.$t('notCloseWindows')}..`
-            this.uploadData.sshInfo = this.$store.getters.sshReq
+            this.uploadData.sshInfo = this.connectionSessionId ? '' : this.$store.getters.sshReq
+            this.uploadData.sessionId = this.connectionSessionId
             this.uploadData.path = this.currentPath
             this.uploadData.id = file.uid
             const dirPath = file.webkitRelativePath
@@ -1131,29 +1139,42 @@ export default {
                 this.$delete(this.uploadProgressSockets, uid)
             }
         },
+        openUploadProgressSocket(file) {
+            if (!file || file.uid === undefined || file.uid === null || this.uploadProgressSockets[file.uid]) {
+                return
+            }
+            const params = {
+                id: file.uid
+            }
+            const token = localStorage.getItem('webssh_token')
+            if (token) {
+                params.token = token
+            }
+            const ws = new WebSocket(buildWsURL('/file/progress', params))
+            this.$set(this.uploadProgressSockets, file.uid, ws)
+            ws.onmessage = event => {
+                const remoteBytes = Number(event.data)
+                if (!Number.isFinite(remoteBytes) || !file.size) {
+                    return
+                }
+                file.percentage = Math.min(100, 50 + (remoteBytes / file.size) * 50)
+            }
+            ws.onclose = () => {
+                this.forgetUploadProgressSocket(file.uid)
+            }
+            ws.onerror = () => {
+                if (file.percentage < 95) {
+                    file.percentage = 95
+                }
+                this.closeUploadProgressSocket(file.uid)
+            }
+        },
         uploadProgress(e, f) {
-            e.percent = e.percent / 2
-            f.percentage = f.percentage / 2
-            if (e.percent === 50 && !this.uploadProgressSockets[f.uid]) {
-                const params = {
-                    id: f.uid
-                }
-                const token = localStorage.getItem('webssh_token')
-                if (token) {
-                    params.token = token
-                }
-                const query = new URLSearchParams(params).toString()
-                const ws = new WebSocket(`${(location.protocol === 'http:' ? 'ws' : 'wss')}://${location.host}${process.env.NODE_ENV === 'production' ? '' : '/ws'}/file/progress?${query}`)
-                this.$set(this.uploadProgressSockets, f.uid, ws)
-                ws.onmessage = e1 => {
-                    f.percentage = (f.size + Number(e1.data)) / (f.size * 2) * 100
-                }
-                ws.onclose = () => {
-                    this.forgetUploadProgressSocket(f.uid)
-                }
-                ws.onerror = () => {
-                    this.closeUploadProgressSocket(f.uid)
-                }
+            const browserPercent = Number(e.percent || 0)
+            e.percent = Math.min(50, browserPercent / 2)
+            f.percentage = e.percent
+            if (browserPercent >= 99) {
+                this.openUploadProgressSocket(f)
             }
         },
         nameSort(a, b) {
@@ -1247,7 +1268,7 @@ export default {
                     this.fileList = []
                 }
 
-                const result = await fileList(this.currentPath, this.$store.getters.sshReq, controller === null ? {} : {
+                const result = await fileList(this.currentPath, this.sshRequestIdentity, controller === null ? {} : {
                     signal: controller.signal
                 })
                 if (requestToken !== this.listRequestToken) {
@@ -1346,7 +1367,7 @@ export default {
                 if (cachedContent !== null) {
                     content = cachedContent
                 } else {
-                    const res = await getFileContent(this.editingFilePath, this.$store.getters.sshReq, controller === null ? {} : {
+                    const res = await getFileContent(this.editingFilePath, this.sshRequestIdentity, controller === null ? {} : {
                         signal: controller.signal
                     })
                     if (requestToken !== this.editorRequestToken) return
@@ -1433,7 +1454,7 @@ export default {
                 const res = await saveFileContent({
                     path: this.editingFilePath,
                     content: this.editingContent,
-                    sshInfo: this.$store.getters.sshReq
+                    ...this.sshRequestIdentity
                 })
                 if (res.Msg === 'success') {
                     this.setFileContentCache(this.editingFilePath, this.editingContent)
@@ -2219,60 +2240,6 @@ export default {
 
     .el-dialog__body {
         padding: 0;
-    }
-
-    .editor-container {
-        display: flex;
-        background: #ffffff;
-        min-height: 500px;
-        max-height: 70vh;
-        overflow-y: auto;
-    }
-
-    .line-numbers-gutter {
-        width: 48px;
-        background: #f8fafc;
-        border-right: 1px solid #e2e8f0;
-        padding-top: 16px;
-        padding-bottom: 16px;
-        flex-shrink: 0;
-        text-align: right;
-        user-select: none;
-    }
-
-    .line-number {
-        font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
-        font-size: 13px;
-        line-height: 1.6;
-        color: #94a3b8;
-        padding-right: 12px;
-    }
-
-    .monaco-like-editor {
-        flex: 1;
-
-        .el-textarea__inner {
-            border: none;
-            border-radius: 0;
-            font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
-            font-size: 13px;
-            line-height: 1.6;
-            background: #ffffff !important;
-            padding: 16px 20px;
-            resize: none;
-            color: #334155 !important;
-            overflow: hidden !important;
-            min-height: 500px !important;
-            caret-color: #3b82f6;
-
-            &::placeholder {
-                color: #94a3b8;
-            }
-
-            &:focus {
-                box-shadow: none;
-            }
-        }
     }
 
     .el-dialog__footer {

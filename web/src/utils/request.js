@@ -3,6 +3,10 @@ import { Message } from 'element-ui'
 import i18n from '@/lang/index'
 
 let lastNetworkErrorAt = 0
+const DEFAULT_RETRY_COUNT = 1
+const DEFAULT_RETRY_DELAY = 400
+const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504])
+const RETRYABLE_METHODS = new Set(['get', 'head', 'options'])
 
 function getStatusMessage(status) {
     switch (status) {
@@ -46,9 +50,40 @@ function notifyNetworkError(message) {
     Message.error(message)
 }
 
+function retryDelay(config = {}) {
+    const retryCount = Number(config.__retryCount || 0)
+    const baseDelay = Number(config.retryDelay || DEFAULT_RETRY_DELAY)
+    const jitter = Math.floor(Math.random() * 120)
+    return baseDelay * Math.pow(2, retryCount) + jitter
+}
+
+function shouldRetry(error) {
+    const config = error && error.config ? error.config : null
+    if (!config || config.skipRetry) {
+        return false
+    }
+    const method = String(config.method || 'get').toLowerCase()
+    if (!RETRYABLE_METHODS.has(method)) {
+        return false
+    }
+    const retry = config.retry === undefined ? DEFAULT_RETRY_COUNT : Number(config.retry)
+    config.__retryCount = Number(config.__retryCount || 0)
+    if (config.__retryCount >= retry) {
+        return false
+    }
+    if (error.response === undefined) {
+        return true
+    }
+    return RETRYABLE_STATUS.has(error.response.status)
+}
+
+function wait(ms) {
+    return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
 var instance = axios.create({
-    timeout: 8000,
-    baseURL: process.env.NODE_ENV === 'production' ? '/' : '/api',
+    timeout: 12000,
+    baseURL: '',
     withCredentials: true
 })
 
@@ -72,6 +107,10 @@ instance.interceptors.response.use(
     err => {
         if (axios.isCancel(err) || err.code === 'ERR_CANCELED') {
             return Promise.reject(err)
+        }
+        if (shouldRetry(err)) {
+            err.config.__retryCount += 1
+            return wait(retryDelay(err.config)).then(() => instance(err.config))
         }
         if (err.response === undefined) {
             notifyNetworkError(i18n.t('serverConnectionFailed'))

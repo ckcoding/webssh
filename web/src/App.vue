@@ -16,14 +16,14 @@
     <div class="app-layout" v-if="appReady">
       <el-container class="main-container">
         <el-header style="height: auto; padding: 0" class="header-wrapper">
-          <vheader @ssh-select="handleSSHSelect" />
+          <vheader ref="header" @ssh-select="handleSSHSelect" />
         </el-header>
         <el-container class="workspace-container">
           <el-aside class="sidebar-wrapper" v-show="$store.state.termList.length > 0 && $store.state.currentTab && $store.state.currentTab.name">
             <server-sidebar />
           </el-aside>
           <el-main style="padding: 0" class="main-wrapper">
-              <tabs ref="tabs"></tabs>
+              <tabs ref="tabs" @new-connection="$refs.header.openConnectionDialog()" @show-hosts="$refs.header.openSavedSSHMenu()"></tabs>
           </el-main>
         </el-container>
       </el-container>
@@ -39,8 +39,9 @@ import ServerSidebar from '@/components/ServerSidebar'
 import Tabs from '@/components/Tabs'
 import LoginModal from '@/components/LoginModal'
 import axios from '@/utils/request'
+import { buildApiPath } from '@/utils/base'
 
-const statusEndpoint = process.env.NODE_ENV === 'production' ? '/api/status' : '/status'
+const statusEndpoint = buildApiPath('/status')
 
 export default {
     name: 'App',
@@ -108,8 +109,6 @@ export default {
 </script>
 
 <style lang="scss">
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
 html, body {
     margin: 0;
     padding: 0;
@@ -125,6 +124,7 @@ html, body {
 
 #app {
     height: 100%;
+    height: 100dvh;
     width: 100%;
     position: relative;
     background-color: #f1f5f9;
@@ -205,21 +205,18 @@ html, body {
     display: flex;
     justify-content: center;
     align-items: center;
-    padding: 12px;
+    padding: 0;
     box-sizing: border-box;
 }
 
 .main-container {
     height: 100%;
     width: 100%;
-    max-width: 1600px;
+    max-width: none;
     background: #ffffff;
-    border: 1px solid rgba(226, 232, 240, 0.8);
-    border-radius: 16px;
-    box-shadow:
-        0 8px 24px -4px rgba(0, 0, 0, 0.08),
-        0 2px 8px -2px rgba(0, 0, 0, 0.04),
-        0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -227,45 +224,48 @@ html, body {
 
 .header-wrapper {
     background: #ffffff;
-    border-bottom: 1px solid #e2e8f0;
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 2px 12px rgba(15, 23, 42, 0.03);
     z-index: 20;
 }
 
 .workspace-container {
-    background: #ffffff;
+    background: var(--workspace-bg);
+    position: relative;
     flex: 1;
     min-height: 0;
 }
 
+.workspace-container::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(#cbd5e1 0.7px, transparent 0.7px);
+    background-size: 24px 24px;
+    opacity: 0.3;
+    pointer-events: none;
+    z-index: 0;
+}
+
 .sidebar-wrapper {
-    width: 310px !important;
-    background: linear-gradient(180deg, #f8fbff 0%, #f6f8fb 100%);
-    border-right: 1px solid #e2e8f0;
+    width: 320px !important;
+    background: transparent;
+    border-right: 0;
     overflow: hidden;
+    position: relative;
+    z-index: 1;
 }
 
 .main-wrapper {
-    height: 100%;
+    flex: 1;
+    overflow: hidden;
     position: relative;
     min-width: 0;
     min-height: 0;
-    background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    background: transparent;
+    z-index: 1;
 }
 
-::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-}
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-::-webkit-scrollbar-thumb {
-    background: rgba(148, 163, 184, 0.3);
-    border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: rgba(148, 163, 184, 0.6);
-}
 
 @media (max-width: 1100px) {
     .workspace-container {

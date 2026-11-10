@@ -1,11 +1,17 @@
 package core
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,20 +22,23 @@ import (
 
 // SavedSSHProfile 已保存的 SSH 配置
 type SavedSSHProfile struct {
-	ID          string `json:"id"`
-	Host        string `json:"host"`
-	IP          string `json:"ip"`
-	CountryFlag string `json:"countryFlag"`
-	Location    string `json:"location"`
-	OS          string `json:"os"`
-	Memory      string `json:"memory"`
-	ExpiresAt   string `json:"expiresAt"`
-	Username    string `json:"username"`
-	Port        int    `json:"port"`
-	Password    string `json:"password"`
-	LoginType   int    `json:"logintype"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID            string `json:"id"`
+	InfoUpdatedAt string `json:"infoUpdatedAt,omitempty"`
+	Host          string `json:"host"`
+	Alias         string `json:"alias"`
+	IP            string `json:"ip"`
+	CountryFlag   string `json:"countryFlag"`
+	Location      string `json:"location"`
+	OS            string `json:"os"`
+	Memory        string `json:"memory"`
+	Remark        string `json:"remark"`
+	ExpiresAt     string `json:"expiresAt"`
+	Username      string `json:"username"`
+	Port          int    `json:"port"`
+	Password      string `json:"password"`
+	LoginType     int    `json:"logintype"`
+	CreatedAt     string `json:"createdAt"`
+	UpdatedAt     string `json:"updatedAt"`
 }
 
 // SSHProfileStore JSON 文件存储
@@ -37,6 +46,13 @@ type SSHProfileStore struct {
 	path     string
 	mu       sync.RWMutex
 	profiles []SavedSSHProfile
+}
+
+type encryptedSSHProfilesFile struct {
+	Version    int    `json:"version"`
+	Algorithm  string `json:"algorithm"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
 }
 
 var (
@@ -97,8 +113,8 @@ func (s *SSHProfileStore) load() error {
 		s.profiles = []SavedSSHProfile{}
 		return nil
 	}
-	var profiles []SavedSSHProfile
-	if err := json.Unmarshal(content, &profiles); err != nil {
+	profiles, err := decodeSSHProfiles(content)
+	if err != nil {
 		return err
 	}
 	s.profiles = profiles
@@ -106,7 +122,7 @@ func (s *SSHProfileStore) load() error {
 }
 
 func (s *SSHProfileStore) persistLocked() error {
-	content, err := json.MarshalIndent(s.profiles, "", "  ")
+	content, err := encodeSSHProfiles(s.profiles)
 	if err != nil {
 		return err
 	}
@@ -115,6 +131,100 @@ func (s *SSHProfileStore) persistLocked() error {
 		return err
 	}
 	return os.Rename(tempPath, s.path)
+}
+
+func sshProfileSecretKey() []byte {
+	secret := strings.TrimSpace(os.Getenv("WEBSSH_SECRET_KEY"))
+	if secret == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(secret))
+	return sum[:]
+}
+
+func decodeSSHProfiles(content []byte) ([]SavedSSHProfile, error) {
+	var profiles []SavedSSHProfile
+	if err := json.Unmarshal(content, &profiles); err == nil {
+		return profiles, nil
+	}
+
+	var encrypted encryptedSSHProfilesFile
+	if err := json.Unmarshal(content, &encrypted); err != nil {
+		return nil, err
+	}
+	if encrypted.Version != 1 || encrypted.Algorithm != "AES-256-GCM" {
+		return nil, fmt.Errorf("unsupported encrypted profile format")
+	}
+	key := sshProfileSecretKey()
+	if len(key) == 0 {
+		return nil, fmt.Errorf("WEBSSH_SECRET_KEY is required to read encrypted profiles")
+	}
+	plaintext, err := decryptSSHProfiles(key, encrypted)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(plaintext, &profiles); err != nil {
+		return nil, err
+	}
+	return profiles, nil
+}
+
+func encodeSSHProfiles(profiles []SavedSSHProfile) ([]byte, error) {
+	plaintext, err := json.MarshalIndent(profiles, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	key := sshProfileSecretKey()
+	if len(key) == 0 {
+		return plaintext, nil
+	}
+	encrypted, err := encryptSSHProfiles(key, plaintext)
+	if err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(encrypted, "", "  ")
+}
+
+func encryptSSHProfiles(key, plaintext []byte) (encryptedSSHProfilesFile, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return encryptedSSHProfilesFile{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return encryptedSSHProfilesFile{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return encryptedSSHProfilesFile{}, err
+	}
+	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	return encryptedSSHProfilesFile{
+		Version:    1,
+		Algorithm:  "AES-256-GCM",
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	}, nil
+}
+
+func decryptSSHProfiles(key []byte, encrypted encryptedSSHProfilesFile) ([]byte, error) {
+	nonce, err := base64.StdEncoding.DecodeString(encrypted.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(encrypted.Ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
 // List 列出所有已保存配置
@@ -227,11 +337,13 @@ func normalizeSavedSSHProfile(profile SavedSSHProfile) (SavedSSHProfile, error) 
 	host := strings.TrimSpace(profile.Host)
 	ip := strings.TrimSpace(profile.IP)
 	countryFlag := strings.TrimSpace(profile.CountryFlag)
+	alias := strings.TrimSpace(profile.Alias)
 	location := strings.TrimSpace(profile.Location)
 	osName := strings.TrimSpace(profile.OS)
 	memory := strings.TrimSpace(profile.Memory)
 	expiresAt := strings.TrimSpace(profile.ExpiresAt)
 	username := strings.TrimSpace(profile.Username)
+	remark := strings.TrimSpace(profile.Remark)
 	if host == "" {
 		return SavedSSHProfile{}, fmt.Errorf("host is required")
 	}
@@ -247,17 +359,20 @@ func normalizeSavedSSHProfile(profile SavedSSHProfile) (SavedSSHProfile, error) 
 		loginType = 0
 	}
 	normalized := SavedSSHProfile{
-		Host:        host,
-		IP:          ip,
-		CountryFlag: countryFlag,
-		Location:    location,
-		OS:          osName,
-		Memory:      memory,
-		ExpiresAt:   expiresAt,
-		Username:    username,
-		Port:        port,
-		Password:    profile.Password,
-		LoginType:   loginType,
+		InfoUpdatedAt: strings.TrimSpace(profile.InfoUpdatedAt),
+		Host:          host,
+		Alias:         alias,
+		IP:            ip,
+		CountryFlag:   countryFlag,
+		Location:      location,
+		OS:            osName,
+		Memory:        memory,
+		Remark:        remark,
+		ExpiresAt:     expiresAt,
+		Username:      username,
+		Port:          port,
+		Password:      profile.Password,
+		LoginType:     loginType,
 	}
 	normalized.ID = profileFingerprint(normalized)
 	return normalized, nil

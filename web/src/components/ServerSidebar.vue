@@ -6,7 +6,7 @@
                     <div class="panel-eyebrow">{{ $t('currentSSHInfo') }}</div>
                     <div class="panel-title">
                         <span v-if="hasActiveTerminal && currentConnectionInfo.countryFlag" style="margin-right: 4px;">{{ currentConnectionInfo.countryFlag }}</span>
-                        {{ hasActiveTerminal ? currentConnectionInfo.host : $t('waitingConnection') }}
+                        {{ hasActiveTerminal ? (currentConnectionInfo.alias || currentConnectionInfo.host) : $t('waitingConnection') }}
                     </div>
                     <div class="panel-subtitle">
                         {{ hasActiveTerminal ? currentConnectionSummary : $t('connectUsingControls') }}
@@ -49,7 +49,6 @@
                                 <span>CPU</span>
                             </div>
                         </div>
-                        <div class="ring-title">{{ cpuMetric.label }}</div>
                         <div v-if="cpuMetric.detail" class="ring-subtitle">{{ cpuMetric.detail }}</div>
                     </div>
                 </div>
@@ -66,7 +65,7 @@
                     </div>
                     <div class="custom-progress">
                         <div class="custom-progress-bg">
-                            <div class="custom-progress-fill" :style="{ width: memoryMetric.percentage + '%', backgroundColor: memoryMetric.color }"></div>
+                            <div class="custom-progress-fill" :style="progressFillStyle(memoryMetric.percentage, memoryMetric.color)"></div>
                         </div>
                     </div>
                 </div>
@@ -83,7 +82,51 @@
                     </div>
                     <div class="custom-progress">
                         <div class="custom-progress-bg">
-                            <div class="custom-progress-fill" :style="{ width: diskMetric.percentage + '%', backgroundColor: diskMetric.color }"></div>
+                            <div class="custom-progress-fill" :style="progressFillStyle(diskMetric.percentage, diskMetric.color)"></div>
+                        </div>
+                    </div>
+                    <div v-if="diskEntries.length > 0" class="disk-volume-list">
+                        <div class="disk-volume-title">{{ $t('MountedDisks') }}</div>
+                        <div v-for="disk in diskEntries" :key="disk.key" class="disk-volume-row">
+                            <div class="disk-volume-main">
+                                <div class="disk-volume-mount">{{ disk.mount }}</div>
+                                <div v-if="disk.device" class="disk-volume-device">{{ disk.device }}</div>
+                            </div>
+                            <div class="disk-volume-side">
+                                <div class="disk-volume-size">{{ disk.detail }}</div>
+                                <div class="disk-volume-percent">{{ disk.percentText }}</div>
+                            </div>
+                            <div class="disk-volume-progress">
+                                <div class="disk-volume-progress-fill" :style="progressFillStyle(disk.percentage, disk.color)"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-if="gpuEntries.length > 0" class="gpu-section">
+                        <div class="disk-volume-title">{{ $t('GraphicsCards') }}</div>
+                        <div v-for="gpu in gpuEntries" :key="gpu.key" class="disk-card gpu-card">
+                            <div class="disk-header">
+                                <div class="disk-left">
+                                    <div class="disk-label">{{ gpu.name }}</div>
+                                    <div v-if="gpu.detail" class="disk-detail">{{ gpu.detail }}</div>
+                                </div>
+                                <div class="disk-right">
+                                    <div class="disk-percent">{{ gpu.usagePercent }}</div>
+                                </div>
+                            </div>
+                            <div class="custom-progress">
+                                <div class="custom-progress-bg">
+                                    <div class="custom-progress-fill" :style="progressFillStyle(gpu.usageValue, gpu.usageColor)"></div>
+                                </div>
+                            </div>
+                            <div v-if="gpu.hasMemory" class="gpu-mem-row">
+                                <div class="gpu-mem-label">{{ $t('MemoryUsage') }}</div>
+                                <div class="gpu-mem-detail">{{ gpu.memoryDetail }}</div>
+                                <div class="custom-progress">
+                                    <div class="custom-progress-bg">
+                                        <div class="custom-progress-fill" :style="progressFillStyle(gpu.memoryUsageValue, gpu.memoryUsageColor)"></div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -133,6 +176,7 @@ export default {
             const current = this.sshInfo || {}
             return {
                 host: current.host || '',
+                alias: this.trimOrEmpty(current.alias),
                 ip: this.trimOrEmpty(current.ip) || this.trimOrEmpty(live.ip) || this.resolveDisplayIP(current),
                 countryFlag: this.trimOrEmpty(current.countryFlag) || this.trimOrEmpty(live.countryFlag),
                 location: this.trimOrEmpty(current.location) || this.trimOrEmpty(live.location),
@@ -142,9 +186,6 @@ export default {
                 port: Number(current.port) || 22,
                 logintype: current.logintype === undefined ? 0 : Number(current.logintype)
             }
-        },
-        formattedServerIP() {
-            return this.formatServerIP(this.currentConnectionInfo)
         },
         currentConnectionSummary() {
             return this.trimOrEmpty(this.currentConnectionInfo.os)
@@ -159,22 +200,103 @@ export default {
             }
         },
         memoryMetric() {
+            const usage = this.systemInfo.memoryUsage
             return {
                 label: this.$t('MemoryUsage'),
-                percentText: this.formatPercent(this.systemInfo.memoryUsage) || '--',
+                percentText: this.formatPercent(usage) || '--',
                 detail: this.memoryMetricValue,
-                percentage: this.progressValue(this.systemInfo.memoryUsage),
-                color: '#3b82f6'
+                percentage: this.progressValue(usage),
+                color: this.usageColor(usage, '#3b82f6')
             }
         },
         diskMetric() {
+            const usage = this.systemInfo.diskUsage
             return {
                 label: this.$t('DiskUsage'),
-                percentText: this.formatPercent(this.systemInfo.diskUsage) || '--',
+                percentText: this.formatPercent(usage) || '--',
                 detail: this.diskMetricValue,
-                percentage: this.progressValue(this.systemInfo.diskUsage),
-                color: '#f59e0b'
+                percentage: this.progressValue(usage),
+                color: this.usageColor(usage, '#22c55e')
             }
+        },
+        diskEntries() {
+            const disks = Array.isArray(this.systemInfo.disks) ? this.systemInfo.disks : []
+            return disks
+                .map((disk, index) => {
+                    const mount = this.trimOrEmpty(disk.mount)
+                    const device = this.trimOrEmpty(disk.device)
+                    const totalMB = Number(disk.totalMB)
+                    const usedMB = Number(disk.usedMB)
+                    const usage = Number(disk.usage)
+                    if ((!mount && !device) || !Number.isFinite(totalMB) || totalMB <= 0) {
+                        return null
+                    }
+                    const total = this.formatSizeMB(totalMB)
+                    const used = this.formatSizeMB(usedMB)
+                    return {
+                        key: `${mount || device}-${index}`,
+                        mount: mount || device,
+                        device: mount && device && device !== mount ? device : '',
+                        detail: used !== '' && total !== '' ? `${used} / ${total}` : total,
+                        percentText: this.formatPercent(usage) || '--',
+                        percentage: this.progressValue(usage),
+                        color: this.usageColor(usage, '#22c55e')
+                    }
+                })
+                .filter(Boolean)
+        },
+        gpuEntries() {
+            const gpus = Array.isArray(this.systemInfo.gpus) ? this.systemInfo.gpus : []
+            return gpus
+                .map((gpu, index) => {
+                    const name = this.trimOrEmpty(gpu.name)
+                    if (!name) {
+                        return null
+                    }
+                    const usage = Number(gpu.usage)
+                    const usageValue = this.progressValue(usage)
+                    const memTotalMB = Number(gpu.memoryTotalMB)
+                    const memUsedMB = Number(gpu.memoryUsedMB)
+                    const hasMemory = Number.isFinite(memTotalMB) && memTotalMB > 0
+                    const memUsage = Number(gpu.memoryUsage)
+                    const memUsageValue = this.progressValue(memUsage)
+                    const parts = []
+                    const driver = this.trimOrEmpty(gpu.driver)
+                    if (driver) {
+                        parts.push(this.$i18n.locale === 'zh' ? '驱动 ' + driver : 'driver ' + driver)
+                    }
+                    const temp = Number(gpu.temperature)
+                    if (Number.isFinite(temp) && temp > 0) {
+                        parts.push(this.$i18n.locale === 'zh' ? temp + '°C' : temp + '°C')
+                    }
+                    const resolution = this.trimOrEmpty(gpu.resolution)
+                    if (resolution) {
+                        parts.push(resolution)
+                    }
+                    let memoryDetail = ''
+                    if (hasMemory) {
+                        const used = this.formatSizeMB(memUsedMB)
+                        const total = this.formatSizeMB(memTotalMB)
+                        if (used !== '' && total !== '') {
+                            memoryDetail = `${used} / ${total}`
+                        } else {
+                            memoryDetail = total
+                        }
+                    }
+                    return {
+                        key: `${name}-${index}`,
+                        name: name,
+                        detail: parts.join(' · '),
+                        usagePercent: this.formatPercent(usage) || '--',
+                        usageValue: usageValue,
+                        usageColor: this.usageColor(usage, '#a855f7'),
+                        hasMemory: hasMemory,
+                        memoryDetail: memoryDetail,
+                        memoryUsageValue: memUsageValue,
+                        memoryUsageColor: this.usageColor(memUsage, '#3b82f6')
+                    }
+                })
+                .filter(Boolean)
         },
         memoryMetricValue() {
             const normalized = this.trimOrEmpty(this.memoryFootnote)
@@ -193,7 +315,7 @@ export default {
         cpuFootnote() {
             const cpuCores = Number(this.systemInfo.cpuCores)
             if (cpuCores > 0) {
-                return `${this.$t('CPUCores')}: ${cpuCores}`
+                return this.$i18n.locale === 'zh' ? `${cpuCores} 核心` : `${cpuCores} cores`
             }
             return this.$t('loadingSystemInfo')
         },
@@ -261,7 +383,34 @@ export default {
             if (!Number.isFinite(parsed)) {
                 return 0
             }
-            return Math.max(0, Math.min(100, Math.round(parsed)))
+            return Math.max(0, Math.min(100, Math.round(parsed * 100) / 100))
+        },
+        usageColor(value, fallback) {
+            const parsed = Number(value)
+            if (!Number.isFinite(parsed)) {
+                return fallback
+            }
+            if (parsed >= 90) {
+                return '#ef4444'
+            }
+            if (parsed >= 75) {
+                return '#f97316'
+            }
+            if (parsed >= 60) {
+                return '#f59e0b'
+            }
+            return fallback
+        },
+        progressFillStyle(value, color) {
+            const percentage = this.progressValue(value)
+            const style = {
+                width: `${percentage}%`,
+                backgroundColor: color
+            }
+            if (percentage > 0 && percentage < 2) {
+                style.minWidth = '4px'
+            }
+            return style
         },
         ringStyle(value, color) {
             const degree = Math.round(this.progressValue(value) * 3.6)
@@ -292,14 +441,6 @@ export default {
             const host = this.trimOrEmpty(info.host)
             return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(':') ? host : ''
         },
-        formatServerIP(info = {}) {
-            const ip = this.resolveDisplayIP(info)
-            const countryFlag = this.trimOrEmpty(info.countryFlag)
-            if (ip === '') {
-                return ''
-            }
-            return countryFlag === '' ? ip : `${ip} ${countryFlag}`
-        },
         formatExpiresAtLabel(value) {
             const normalized = this.trimOrEmpty(value)
             if (normalized === '') {
@@ -324,26 +465,6 @@ export default {
             return date.toLocaleString(this.$i18n.locale === 'zh' ? 'zh-CN' : 'en-US', {
                 hour12: false
             })
-        },
-        formatUpdatedAt(value) {
-            const normalized = this.trimOrEmpty(value)
-            if (normalized === '' || normalized === '--') {
-                return ''
-            }
-            const parsed = new Date(normalized)
-            if (Number.isNaN(parsed.getTime())) {
-                return normalized
-            }
-            return parsed.toLocaleString(this.$i18n.locale === 'zh' ? 'zh-CN' : 'en-US', {
-                hour12: false
-            })
-        },
-        isValidTimestamp(value) {
-            const normalized = this.trimOrEmpty(value)
-            if (normalized === '' || normalized === '--') {
-                return false
-            }
-            return !Number.isNaN(new Date(normalized).getTime())
         }
     }
 }
@@ -354,78 +475,49 @@ export default {
     height: 100%;
     display: flex;
     flex-direction: column;
-    padding: 20px;
+    padding: 20px 0 20px 24px;
     box-sizing: border-box;
     min-height: 0;
-    background: 
-        radial-gradient(circle at top right, rgba(99, 102, 241, 0.15), transparent 40%),
-        radial-gradient(circle at bottom left, rgba(56, 189, 248, 0.15), transparent 40%),
-        radial-gradient(circle at center, rgba(168, 85, 247, 0.08), transparent 50%),
-        linear-gradient(180deg, #f4f7f9 0%, #f9fafb 100%);
+    background: transparent;
     position: relative;
     overflow: hidden;
 }
 
-.sidebar-container::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: url('data:image/svg+xml;utf8,<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><filter id="noiseFilter"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(%23noiseFilter)"/></svg>');
-    opacity: 0.03;
-    pointer-events: none;
-}
-
 .sidebar-panel {
-    background: rgba(255, 255, 255, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.9);
-    border-radius: 24px;
-    padding: 20px;
-    box-shadow: 
-        0 20px 40px -15px rgba(0, 0, 0, 0.05),
-        0 0 0 1px rgba(255, 255, 255, 0.8) inset;
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+    box-shadow: var(--panel-shadow);
     z-index: 1;
 }
 
 .current-panel {
     height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
 }
 
 .panel-header {
+    flex-shrink: 0;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
 }
 
 .panel-body {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     margin: 0 -12px;
     padding: 0 12px;
 }
 
-.custom-scrollbar {
-    &::-webkit-scrollbar {
-        width: 4px;
-    }
-    &::-webkit-scrollbar-track {
-        background: transparent;
-    }
-    &::-webkit-scrollbar-thumb {
-        background: rgba(148, 163, 184, 0.2);
-        border-radius: 10px;
-    }
-    &::-webkit-scrollbar-thumb:hover {
-        background: rgba(148, 163, 184, 0.4);
-    }
-}
 
 .panel-title-wrap {
     flex: 1;
@@ -434,22 +526,24 @@ export default {
 }
 
 .panel-eyebrow {
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 0.12em;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    color: var(--text-muted);
 }
 
 .panel-title {
     margin-top: 8px;
     font-size: 18px;
-    font-weight: 800;
+    font-weight: 700;
     color: #0f172a;
     line-height: 1.25;
     word-break: break-all;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     letter-spacing: -0.01em;
 }
 
@@ -477,14 +571,14 @@ export default {
 .meta-chip {
     display: inline-flex;
     align-items: center;
-    padding: 6px 14px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.8);
+    padding: 5px 9px;
+    border-radius: 6px;
+    background: #f5f7fb;
     color: #334155;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.02em;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.02), inset 0 1px 0 rgba(255,255,255,1);
+    font-family: var(--mono-font);
     border: 1px solid rgba(226, 232, 240, 0.8);
 }
 
@@ -510,11 +604,10 @@ export default {
     flex-direction: column;
     align-items: center;
     gap: 10px;
-    padding: 24px 16px;
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.7);
-    border: 1px solid rgba(255, 255, 255, 0.9);
-    box-shadow: 0 4px 15px -5px rgba(0, 0, 0, 0.03);
+    padding: 20px 16px;
+    border-radius: 10px;
+    background: #f8fafd;
+    border: 1px solid #edf0f6;
 }
 
 .ring-circle {
@@ -574,10 +667,9 @@ export default {
 .disk-card {
     margin-top: 8px;
     padding: 14px 16px;
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.7);
-    border: 1px solid rgba(255, 255, 255, 0.9);
-    box-shadow: 0 4px 15px -5px rgba(0, 0, 0, 0.03);
+    border-radius: 10px;
+    background: #f8fafd;
+    border: 1px solid #edf0f6;
 }
 
 .disk-header {
@@ -620,13 +712,6 @@ export default {
     line-height: 1;
 }
 
-.disk-mount {
-    margin-top: 4px;
-    font-size: 11px;
-    color: #94a3b8;
-    font-weight: 700;
-}
-
 .custom-progress {
     width: 100%;
     margin-top: 8px;
@@ -634,7 +719,7 @@ export default {
 
 .custom-progress-bg {
     width: 100%;
-    height: 16px;
+    height: 6px;
     background-color: rgba(226, 232, 240, 0.6);
     border-radius: 4px;
     overflow: hidden;
@@ -646,20 +731,128 @@ export default {
     height: 100%;
     border-radius: 4px;
     transition: width 0.5s ease-in-out;
-    background-image: linear-gradient(
-        45deg,
-        rgba(255, 255, 255, 0.15) 25%,
-        transparent 25%,
-        transparent 50%,
-        rgba(255, 255, 255, 0.15) 50%,
-        rgba(255, 255, 255, 0.15) 75%,
-        transparent 75%,
-        transparent
-    );
-    background-size: 1rem 1rem;
+}
+
+.disk-volume-list {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(148, 163, 184, 0.16);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.disk-volume-title {
+    font-size: 11px;
+    font-weight: 800;
+    color: #64748b;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.gpu-section {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(148, 163, 184, 0.16);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gpu-card {
+    padding: 10px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 10px;
+    background: rgba(248, 250, 252, 0.6);
+}
+
+.gpu-card .disk-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1e293b;
+    word-break: break-word;
+}
+
+.gpu-mem-row {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.gpu-mem-label {
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748b;
+    letter-spacing: 0.04em;
+}
+
+.gpu-mem-detail {
+    font-size: 11px;
+    color: #475569;
+}
+
+.disk-volume-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.disk-volume-main {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.disk-volume-mount {
+    font-size: 12px;
+    font-weight: 700;
+    color: #0f172a;
+    word-break: break-all;
+}
+
+.disk-volume-device {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #94a3b8;
+    word-break: break-all;
+}
+
+.disk-volume-side {
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.disk-volume-progress {
+    flex: 1 0 100%;
+    height: 6px;
+    border-radius: 3px;
+    background-color: rgba(226, 232, 240, 0.72);
+    overflow: hidden;
+}
+
+.disk-volume-progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.5s ease-in-out;
+}
+
+.disk-volume-size {
+    font-size: 12px;
+    font-weight: 600;
+    color: #334155;
+}
+
+.disk-volume-percent {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #64748b;
+    font-weight: 700;
 }
 
 .status-row {
+    flex-shrink: 0;
     margin-top: 12px;
     padding-top: 12px;
     display: flex;
@@ -673,6 +866,8 @@ export default {
     justify-content: space-between;
     align-items: center;
     width: 100%;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
 .status-uptime {
@@ -691,6 +886,8 @@ export default {
     justify-content: space-between;
     align-items: center;
     width: 100%;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 .status-time {

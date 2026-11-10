@@ -2,9 +2,9 @@
     <div class="header-container">
         <div class="nav-bar">
             <div class="brand">
-                <span class="brand-icon">🖥️</span>
-                <span class="logo">Web</span><span class="logo-bold">SSH</span>
-                <span class="brand-badge">终端管理</span>
+                <span class="brand-icon" aria-hidden="true">&gt;_</span>
+                <span class="brand-name"><span class="logo">Web</span><span class="logo-bold">SSH</span></span>
+                <span class="brand-badge">{{ $t('workspaceCaption') }}</span>
             </div>
 
             <div class="nav-actions">
@@ -13,25 +13,37 @@
                     {{ $t('NewHost') }}
                 </el-button>
 
-                <el-dropdown trigger="click" @command="handleSavedCommand" placement="bottom-end">
+                <el-dropdown ref="savedSSHDropdown" trigger="click" @command="handleSavedCommand" @visible-change="handleSavedSSHVisibility" @keydown.native.capture="handleSavedSSHKeydown" placement="bottom-end">
                     <el-button size="small" icon="el-icon-menu" class="icon-btn">
                         {{ savedSSHButtonLabel }} <i class="el-icon-arrow-down el-icon--right"></i>
                     </el-button>
-                    <el-dropdown-menu slot="dropdown" class="premium-dropdown">
-                        <div v-if="savedSSHList.length === 0" class="empty-dropdown">
+                    <el-dropdown-menu ref="savedSSHMenu" slot="dropdown" class="premium-dropdown" :visible-arrow="false" @keydown.native.capture="handleSavedSSHKeydown">
+                        <li v-if="savedSSHList.length > 0" class="host-search" role="presentation" @click.stop>
+                            <div class="host-menu-heading"><span>{{ $t('SavedSSH') }} <span class="host-count">{{ filteredSavedSSHList.length }} / {{ savedSSHList.length }}</span></span><el-button type="text" size="mini" icon="el-icon-refresh" :loading="savedMetadataLoading" @click.stop="refreshSavedMetadata(true)">{{ savedMetadataLoading ? $t('collectingServerInfo', { done: savedMetadataDone, total: savedMetadataTotal }) : $t('collectServerInfo') }}</el-button></div>
+                            <el-input v-model="savedSSHSearch" size="small" clearable prefix-icon="el-icon-search"
+                                :placeholder="$t('searchHosts')" :aria-label="$t('searchHosts')"></el-input>
+                        </li>
+                        <li v-if="savedSSHList.length === 0" class="empty-dropdown" role="presentation">
                             <i class="el-icon-monitor"></i>
                             <p>{{ $t('noSavedConnections') }}</p>
-                        </div>
-                        <el-dropdown-item v-for="item in savedSSHList" :key="item.id" :command="item">
+                        </li>
+                        <li v-else-if="filteredSavedSSHList.length === 0" class="empty-dropdown" role="presentation">
+                            <i class="el-icon-search"></i>
+                            <p>{{ $t('noMatchingHosts') }}</p>
+                        </li>
+                        <el-dropdown-item v-for="item in filteredSavedSSHList" :key="item.id" :command="item">
                             <div class="dropdown-item-content">
-                                <div class="item-avatar">{{ (item.host || '?')[0].toUpperCase() }}</div>
+                                <div class="item-avatar">{{ (item.alias || item.host || '?')[0].toUpperCase() }}</div>
                                 <div class="item-info-dropdown">
                                     <div class="item-host-row">
                                         <span class="item-status-dot" :class="savedSSHHealthClass(item)" :title="savedSSHHealthTitle(item)"></span>
-                                        <div class="item-host">{{ item.host }}</div>
+                                        <div class="item-host">{{ item.alias || item.host }}</div>
                                     </div>
-                                    <div class="item-user">{{ item.username }}@{{ item.port }} · {{ authModeLabel(item)
+                                    <div class="item-user">{{ item.alias ? item.host + " · " : "" }}{{ item.username }}@{{ item.port }} · {{ authModeLabel(item)
                                         }}</div>
+                                    <div v-if="item.remark" class="item-remark-row">
+                                        <span class="remark-text">{{ item.remark }}</span>
+                                    </div>
                                     <div v-if="buildServerInfoChips(item).length > 0" class="item-meta-row">
                                         <span v-for="chip in buildServerInfoChips(item)" :key="chip.key"
                                             class="info-chip">{{ chip.label }}</span>
@@ -57,6 +69,11 @@
         <el-dialog :title="editingSSHId ? $t('EditHost') : $t('NewHost')" :visible.sync="connectionDialogVisible" width="520px"
             custom-class="premium-dialog" :close-on-click-modal="false" :close-on-press-escape="false" append-to-body>
             <el-form ref="sshForm" :model="draftSSHInfo" :rules="checkRules" label-position="top" @submit.native.prevent>
+                <el-form-item :label="$t('Alias')">
+                            <el-input v-model.trim="draftSSHInfo.alias" :placeholder="$t('aliasTip')"
+                                @keyup.enter.native="handleSaveAndConnect"></el-input>
+                        </el-form-item>
+
                 <el-row :gutter="20">
                     <el-col :span="16">
                         <el-form-item :label="$t('Host')" prop="host">
@@ -88,6 +105,11 @@
                         class="full-width-input"
                     ></el-date-picker>
                     <div class="field-hint">{{ $t('expiresAtTip') }}</div>
+                </el-form-item>
+
+                <el-form-item :label="$t('Remark')">
+                    <el-input v-model="draftSSHInfo.remark" :placeholder="$t('remarkTip')"
+                        @keyup.enter.native="handleSaveAndConnect"></el-input>
                 </el-form-item>
 
                 <div class="auth-section">
@@ -141,7 +163,7 @@
 import { getLanguage } from '@/lang/index'
 import FileList from '@/components/FileList'
 import KeyboardShortcuts from '@/components/KeyboardShortcuts'
-import { buildSSHSystemStreamURL, checkSSHConnection, deleteSavedSSH, getSSHSystemInfo, listSavedSSH, saveSavedSSH } from '@/api/ssh'
+import { buildSSHSystemStreamURL, checkSSHConnection, createSSHSession, deleteSavedSSH, getSSHSystemInfo, listSavedSSH, refreshSavedSSHInfo, saveSavedSSH } from '@/api/ssh'
 import { mapState } from 'vuex'
 import { decodeSSHList, encodeSSHInfo, encodeSSHList, isSameSSH, normalizeSSHInfo } from '@/utils/ssh'
 
@@ -153,6 +175,8 @@ function createSSHInfo(source = {}) {
     const normalized = normalizeSSHInfo(source)
     return {
         ...normalized,
+        alias: source.alias || '',
+        remark: source.remark || '',
         password: source.password === undefined ? '' : source.password
     }
 }
@@ -166,10 +190,10 @@ function buildSSHIdentity(source = {}) {
 }
 
 async function runWithConcurrency(items, limit, handler) {
-    const queue = items.slice()
-    const workers = new Array(Math.max(1, Math.min(limit, queue.length))).fill(null).map(async () => {
-        while (queue.length > 0) {
-            const item = queue.shift()
+    let nextIndex = 0
+    const workers = new Array(Math.max(1, Math.min(limit, items.length))).fill(null).map(async () => {
+        while (nextIndex < items.length) {
+            const item = items[nextIndex++]
             if (!item) {
                 return
             }
@@ -200,14 +224,31 @@ export default {
             savedSSHHealthMap: {},
             savedSSHHealthSnapshotKey: '',
             savedSSHHealthRequestId: 0,
+            savedSSHSearch: '',
+            savedMetadataLoading: false,
+            savedMetadataDone: 0,
+            savedMetadataTotal: 0,
+            savedMetadataRequestId: 0,
             editingSSHId: '',
-            pageVisibilityHandler: null
+            pageVisibilityHandler: null,
+            networkOnlineHandler: null,
+            networkOfflineHandler: null
         }
     },
     computed: {
-        ...mapState(['sshInfo', 'systemInfo', 'currentTab', 'termList']),
+        ...mapState(['sshInfo', 'connectionSessionId', 'systemInfo', 'currentTab', 'termList']),
         savedSSHList() {
             return this.$store.state.savedSSHList || []
+        },
+        filteredSavedSSHList() {
+            const query = this.savedSSHSearch.trim().toLowerCase()
+            if (!query) {
+                return this.savedSSHList
+            }
+            return this.savedSSHList.filter(item =>
+                ['alias', 'host', 'ip', 'username', 'port', 'remark', 'location', 'os']
+                    .some(key => String(item[key] || '').toLowerCase().includes(query))
+            )
         },
         savedSSHButtonLabel() {
             if (this.savedSSHList.length === 0) {
@@ -291,6 +332,16 @@ export default {
         }
     },
     watch: {
+        savedSSHSearch() {
+            this.$nextTick(() => {
+                if (this.$refs.savedSSHMenu) {
+                    this.$refs.savedSSHMenu.$el.scrollTop = 0
+                }
+            })
+        },
+        filteredSavedSSHList() {
+            this.$nextTick(this.syncSavedSSHMenu)
+        },
         draftConnectionFingerprint(next, prev) {
             if (prev !== undefined && next !== prev) {
                 this.resetConnectionCheckState()
@@ -356,6 +407,8 @@ export default {
                 location: this.trimOrEmpty(source.location),
                 os: this.trimOrEmpty(source.os),
                 memory: this.trimOrEmpty(source.memory),
+                alias: this.trimOrEmpty(source.alias),
+                remark: this.trimOrEmpty(source.remark),
                 expiresAt: this.trimOrEmpty(source.expiresAt),
                 username: this.trimOrEmpty(source.username),
                 port: Number(source.port) || 0,
@@ -371,7 +424,8 @@ export default {
                 port: payload.port,
                 password: payload.password,
                 logintype: payload.logintype,
-                probeOnly: Boolean(options.probeOnly)
+                probeOnly: Boolean(options.probeOnly),
+                prepareSession: Boolean(options.prepareSession)
             }
         },
         async validateSSHForm() {
@@ -384,8 +438,30 @@ export default {
                 })
             })
         },
-        connectDraftSSH() {
-            this.$store.commit('SET_SSH', createSSHInfo(this.draftSSHInfo))
+        buildActiveSSHRequest(sshInfo = this.sshInfo) {
+            if (this.connectionSessionId) {
+                return { sessionId: this.connectionSessionId }
+            }
+            return { sshInfo: encodeSSHInfo(createSSHInfo(sshInfo)) }
+        },
+        async createConnectionSession(sshInfo) {
+            try {
+                const result = await createSSHSession({
+                    sshInfo: encodeSSHInfo(createSSHInfo(sshInfo))
+                })
+                if (result.Msg === 'success' && result.Data && result.Data.sessionId) {
+                    return result.Data.sessionId
+                }
+            } catch {
+                // 保留旧 sshInfo 请求路径作为兼容兜底。
+            }
+            return ''
+        },
+        async connectDraftSSH(preparedSessionId = '') {
+            const nextSSH = createSSHInfo(this.draftSSHInfo)
+            const sessionId = preparedSessionId || await this.createConnectionSession(nextSSH)
+            this.$store.commit('SET_SSH', nextSSH)
+            this.$store.commit('SET_CONNECTION_SESSION_ID', sessionId)
             this.$store.commit('CLEAR_SYSTEM_INFO')
             this.connectionDialogVisible = false
             this.$emit('ssh-select')
@@ -488,6 +564,9 @@ export default {
         isPageHidden() {
             return typeof document !== 'undefined' && document.visibilityState === 'hidden'
         },
+        isBrowserOffline() {
+            return typeof navigator !== 'undefined' && navigator.onLine === false
+        },
         handlePageVisibilityChange() {
             if (this.isPageHidden()) {
                 this.stopSystemInfoUpdates()
@@ -496,6 +575,15 @@ export default {
             if (!this.connectionDialogVisible && this.activeSystemInfoKey !== '') {
                 this.startSystemInfoUpdates()
             }
+        },
+        handleNetworkOnline() {
+            if (!this.connectionDialogVisible && this.activeSystemInfoKey !== '' && !this.isPageHidden()) {
+                this.startSystemInfoUpdates()
+            }
+        },
+        handleNetworkOffline() {
+            this.stopSystemInfoUpdates()
+            this.systemInfoLoading = false
         },
         async probeSSH(payload) {
             const result = await checkSSHConnection(payload)
@@ -586,7 +674,90 @@ export default {
         savedSSHHealthTitle(item = {}) {
             return this.getSavedSSHHealth(item).message
         },
+        needsSavedMetadata(item) {
+            const updated = Date.parse(item.infoUpdatedAt || '')
+            return !item.os || !item.memory || !item.ip || (Number.isFinite(updated) && Date.now() - updated > 24 * 60 * 60 * 1000)
+        },
+        async refreshSavedMetadata(force = false) {
+            if (this.savedMetadataLoading || this.isBrowserOffline() || (!force && this.isPageHidden())) {
+                return
+            }
+            // Opening the menu must not repeatedly authenticate a failed host.
+            // The explicit refresh button or a credential edit allows a retry.
+            const targets = this.savedSSHList.filter(item => force || (
+                this.trimOrEmpty(item.password) !== '' && this.needsSavedMetadata(item) &&
+                (this.savedSSHHealthMap[item.id] || {}).status !== 'error'
+            ))
+            if (targets.length === 0) {
+                return
+            }
+            if (force && this.$refs.savedSSHMenu) {
+                // The loading button becomes disabled; keep keyboard control
+                // in the menu instead of letting focus fall back to the page.
+                const input = this.$refs.savedSSHMenu.$el.querySelector('input')
+                if (input) {
+                    input.focus({ preventScroll: true })
+                }
+            }
+            const requestId = ++this.savedMetadataRequestId
+            this.savedSSHHealthRequestId += 1
+            this.savedMetadataLoading = true
+            this.savedMetadataDone = 0
+            this.savedMetadataTotal = targets.length
+            let success = 0
+            let failed = 0
+            targets.forEach(item => this.setSavedSSHHealth(item))
+            try {
+                await runWithConcurrency(targets, 2, async item => {
+                    if (requestId !== this.savedMetadataRequestId || (!force && this.isPageHidden()) || this.isBrowserOffline()) {
+                        return
+                    }
+                    try {
+                        if (this.trimOrEmpty(item.password) === '') {
+                            throw new Error(this.$t('hostMissingCredential'))
+                        }
+                        const result = await refreshSavedSSHInfo(item.id)
+                        if (result.Msg !== 'success' || !result.Data || !result.Data.profile) {
+                            throw new Error(this.trimOrEmpty(result.Msg) || this.$t('systemInfoUnavailable'))
+                        }
+                        if (requestId !== this.savedMetadataRequestId) {
+                            return
+                        }
+                        const profile = result.Data.profile
+                        // Merge only the returned metadata into the current list. A
+                        // concurrent edit or deletion must not be undone by a late response.
+                        const keys = ['ip', 'countryFlag', 'location', 'os', 'memory', 'infoUpdatedAt']
+                        const metadata = Object.fromEntries(keys.map(key => [key, profile[key]]))
+                        this.$store.commit('SET_SAVED_LIST', this.savedSSHList.map(current => current.id === profile.id ? { ...current, ...metadata } : current))
+                        this.syncHistoryMetadata(item, metadata)
+                        this.hydrateSSHMetadataFromCollections(this.sshInfo)
+                        this.setSavedSSHHealth(item, { status: 'success', message: this.$t('serverInfoUpdated') })
+                        success += 1
+                    } catch (error) {
+                        if (requestId === this.savedMetadataRequestId) {
+                            this.setSavedSSHHealth(item, { status: 'error', message: this.formatProbeError(error, this.$t('systemInfoUnavailable')) })
+                            failed += 1
+                        }
+                    } finally {
+                        if (requestId === this.savedMetadataRequestId) {
+                            this.savedMetadataDone += 1
+                        }
+                    }
+                })
+                if (force && requestId === this.savedMetadataRequestId) {
+                    this.$message({ type: failed ? 'warning' : 'success', message: this.$t('serverInfoSummary', { success, failed }) })
+                }
+            } finally {
+                if (requestId === this.savedMetadataRequestId) {
+                    this.savedMetadataLoading = false
+                    this.savedSSHHealthSnapshotKey = this.buildSavedSSHHealthSnapshotKey()
+                }
+            }
+        },
         async refreshSavedSSHHealth() {
+            if (this.savedMetadataLoading) {
+                return
+            }
             const list = this.savedSSHList.slice()
             if (list.length === 0) {
                 this.syncSavedSSHHealthMap([])
@@ -617,6 +788,9 @@ export default {
                 return
             }
             await runWithConcurrency(targets, SAVED_SSH_HEALTH_CONCURRENCY, async (item) => {
+                if (requestId !== this.savedSSHHealthRequestId || this.isPageHidden() || this.isBrowserOffline()) {
+                    return
+                }
                 let health
                 if (this.trimOrEmpty(item.password) === '') {
                     health = {
@@ -691,7 +865,7 @@ export default {
                 this.connectionCheckLoading = false
             }
         },
-        applySSHCommand(command) {
+        async applySSHCommand(command) {
             const normalized = createSSHInfo(command)
             this.draftSSHInfo = createSSHInfo(normalized)
 
@@ -699,13 +873,64 @@ export default {
                 this.openConnectionDialog(normalized)
                 return
             }
+            const sessionId = await this.createConnectionSession(normalized)
             this.$store.commit('SET_SSH', normalized)
+            this.$store.commit('SET_CONNECTION_SESSION_ID', sessionId)
             this.$store.commit('CLEAR_SYSTEM_INFO')
             this.connectionDialogVisible = false
             this.$emit('ssh-select')
         },
         handleSavedCommand(command) {
             this.applySSHCommand(command)
+        },
+        openSavedSSHMenu() {
+            this.$refs.savedSSHDropdown.show()
+        },
+        syncSavedSSHMenu() {
+            const dropdown = this.$refs.savedSSHDropdown
+            const menu = this.$refs.savedSSHMenu
+            if (!dropdown || !menu) {
+                return
+            }
+            // Element UI caches menu items before the asynchronous host list loads.
+            dropdown.menuItems = menu.$el.querySelectorAll('.el-dropdown-menu__item')
+            dropdown.menuItemsArray = Array.from(dropdown.menuItems)
+            menu.$emit('updatePopper')
+        },
+        handleSavedSSHVisibility(visible) {
+            if (visible) {
+                void this.refreshSavedMetadata().then(() => this.refreshSavedSSHHealth())
+                this.$nextTick(() => {
+                    this.syncSavedSSHMenu()
+                    const input = this.$refs.savedSSHMenu.$el.querySelector('input')
+                    if (input) {
+                        input.focus({ preventScroll: true })
+                    }
+                })
+            }
+        },
+        handleSavedSSHKeydown(event) {
+            if (event.key === 'Escape') {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+                const dropdown = this.$refs.savedSSHDropdown
+                if (dropdown) {
+                    dropdown.hide()
+                    this.$nextTick(() => {
+                        const trigger = dropdown.$el.querySelector('button')
+                        if (trigger) {
+                            trigger.focus()
+                        }
+                    })
+                }
+                return
+            }
+            const isSearchInput = event.target.tagName === 'INPUT'
+            const isArrow = ['ArrowUp', 'ArrowDown'].includes(event.key)
+            if ((isSearchInput && event.key === 'Enter') || (isArrow && this.filteredSavedSSHList.length === 0)) {
+                event.preventDefault()
+                event.stopImmediatePropagation()
+            }
         },
         async fetchSavedSSHList() {
             try {
@@ -717,7 +942,7 @@ export default {
                 const nextList = result.Data && result.Data.list ? result.Data.list : []
                 this.$store.commit('SET_SAVED_LIST', nextList)
                 this.syncSavedSSHHealthMap(nextList)
-                this.refreshSavedSSHHealth()
+                void this.refreshSavedMetadata().then(() => this.refreshSavedSSHHealth())
             } catch {
                 // 错误提示由请求拦截器统一处理。
             }
@@ -806,14 +1031,17 @@ export default {
             }
         },
         async handleSaveAndConnect() {
+            if (this.saveAndConnectLoading) {
+                return false
+            }
             const valid = await this.validateSSHForm()
-            if (!valid) {
+            if (!valid || this.saveAndConnectLoading) {
                 return false
             }
             this.saveAndConnectLoading = true
             this.connectionCheckResult = null
             try {
-                const data = await this.probeSSH(this.buildCheckPayload())
+                const data = await this.probeSSH(this.buildCheckPayload(this.draftSSHInfo, { probeOnly: true, prepareSession: true }))
                 this.applyDraftSSHMetadata(data.info || {})
                 this.connectionCheckResult = {
                     state: 'success',
@@ -821,7 +1049,7 @@ export default {
                     description: this.formatConnectionCheckDescription(data)
                 }
                 const draftToPersist = createSSHInfo(this.draftSSHInfo)
-                this.connectDraftSSH()
+                await this.connectDraftSSH(data.sessionId || '')
                 void this.persistDraftSSH(draftToPersist, {
                     knownHealth: {
                         status: 'success',
@@ -885,7 +1113,7 @@ export default {
         },
         startSystemInfoUpdates() {
             this.stopSystemInfoUpdates()
-            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden()) {
+            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden() || this.isBrowserOffline()) {
                 return
             }
             if (typeof window !== 'undefined' && typeof window.EventSource === 'function') {
@@ -896,7 +1124,7 @@ export default {
         },
         openSystemInfoStream(delay = 0) {
             this.stopSystemInfoStream()
-            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden()) {
+            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden() || this.isBrowserOffline()) {
                 return
             }
             const requestKey = this.activeSystemInfoKey
@@ -907,11 +1135,11 @@ export default {
             }
 
             const start = () => {
-                if (requestKey !== this.activeSystemInfoKey || requestIdentity !== this.activeSSHIdentity || this.connectionDialogVisible || this.isPageHidden()) {
+                if (requestKey !== this.activeSystemInfoKey || requestIdentity !== this.activeSSHIdentity || this.connectionDialogVisible || this.isPageHidden() || this.isBrowserOffline()) {
                     return
                 }
                 this.systemInfoLoading = true
-                const source = new window.EventSource(buildSSHSystemStreamURL(encodeSSHInfo(sshInfo)))
+                const source = new window.EventSource(buildSSHSystemStreamURL(this.buildActiveSSHRequest(sshInfo)))
                 this.systemInfoSource = source
 
                 source.onmessage = (event) => {
@@ -943,7 +1171,7 @@ export default {
                     this.systemInfoSource = null
                     this.systemInfoFailureCount += 1
                     this.systemInfoLoading = false
-                    if (requestKey !== this.activeSystemInfoKey || requestIdentity !== this.activeSSHIdentity || this.connectionDialogVisible || this.isPageHidden()) {
+                    if (requestKey !== this.activeSystemInfoKey || requestIdentity !== this.activeSSHIdentity || this.connectionDialogVisible || this.isPageHidden() || this.isBrowserOffline()) {
                         return
                     }
                     const retryDelay = Math.min(SYSTEM_INFO_RETRY_MAX_INTERVAL, SYSTEM_INFO_REFRESH_INTERVAL * Math.pow(2, Math.max(0, this.systemInfoFailureCount - 1)))
@@ -965,7 +1193,7 @@ export default {
         },
         scheduleSystemInfoRefresh(delay = SYSTEM_INFO_REFRESH_INTERVAL) {
             this.stopSystemInfoRefresh()
-            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden()) {
+            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.isPageHidden() || this.isBrowserOffline()) {
                 return
             }
             this.systemInfoTimer = window.setTimeout(() => {
@@ -1079,7 +1307,7 @@ export default {
             this.syncSavedSSHMetadata(baseInfo, metadata)
         },
         async refreshSystemInfo() {
-            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.systemInfoLoading || this.isPageHidden()) {
+            if (this.activeSystemInfoKey === '' || this.connectionDialogVisible || this.systemInfoLoading || this.isPageHidden() || this.isBrowserOffline()) {
                 return
             }
             const sshInfo = createSSHInfo(this.sshInfo)
@@ -1093,7 +1321,7 @@ export default {
             const requestId = ++this.systemInfoRequestId
 
             try {
-                const result = await getSSHSystemInfo(encodeSSHInfo(sshInfo))
+                const result = await getSSHSystemInfo(this.buildActiveSSHRequest(sshInfo))
                 if (requestId !== this.systemInfoRequestId || requestKey !== this.activeSystemInfoKey || requestIdentity !== this.activeSSHIdentity) {
                     return
                 }
@@ -1131,13 +1359,31 @@ export default {
             this.handlePageVisibilityChange()
         }
         document.addEventListener('visibilitychange', this.pageVisibilityHandler)
+        this.networkOnlineHandler = () => {
+            this.handleNetworkOnline()
+        }
+        this.networkOfflineHandler = () => {
+            this.handleNetworkOffline()
+        }
+        window.addEventListener('online', this.networkOnlineHandler)
+        window.addEventListener('offline', this.networkOfflineHandler)
     },
     beforeDestroy() {
+        this.savedSSHHealthRequestId += 1
+        this.savedMetadataRequestId += 1
         this.stopSystemInfoUpdates()
         this.systemInfoRequestId += 1
         if (this.pageVisibilityHandler !== null) {
             document.removeEventListener('visibilitychange', this.pageVisibilityHandler)
             this.pageVisibilityHandler = null
+        }
+        if (this.networkOnlineHandler !== null) {
+            window.removeEventListener('online', this.networkOnlineHandler)
+            this.networkOnlineHandler = null
+        }
+        if (this.networkOfflineHandler !== null) {
+            window.removeEventListener('offline', this.networkOfflineHandler)
+            this.networkOfflineHandler = null
         }
         if (!this.hasActiveTerminal) {
             this.$store.commit('CLEAR_SYSTEM_INFO')
@@ -1148,7 +1394,7 @@ export default {
 
 <style scoped lang="scss">
 .header-container {
-    padding: 10px 20px;
+    padding: 14px 24px;
     background: transparent;
 }
 
@@ -1166,20 +1412,28 @@ export default {
     gap: 8px;
 
     .brand-icon {
-        font-size: 18px;
-        line-height: 1;
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        margin-right: 4px;
+        border-radius: 10px;
+        background: #17243b;
+        color: #a7c8ff;
+        font: 700 17px var(--mono-font);
+        box-shadow: 0 3px 8px rgba(23, 36, 59, 0.16);
     }
 
     .logo {
         font-size: 20px;
-        color: #64748b;
-        font-weight: 300;
+        color: #17243b;
+        font-weight: 600;
         letter-spacing: -0.3px;
     }
 
     .logo-bold {
         font-size: 20px;
-        color: #3b82f6;
+        color: #2563eb;
         font-weight: 800;
         letter-spacing: -0.5px;
     }
@@ -1187,13 +1441,12 @@ export default {
     .brand-badge {
         font-size: 10px;
         font-weight: 600;
-        color: #ffffff;
-        background: linear-gradient(135deg, #3b82f6, #7c3aed);
-        padding: 3px 10px;
-        border-radius: 20px;
-        letter-spacing: 0.03em;
+        color: #7b879a;
+        padding: 4px 0 4px 14px;
+        border-left: 1px solid var(--border);
+        margin-left: 8px;
+        letter-spacing: 0.08em;
         white-space: nowrap;
-        box-shadow: 0 2px 6px rgba(124, 58, 237, 0.3);
     }
 }
 
@@ -1209,12 +1462,13 @@ export default {
     font-weight: 600 !important;
     letter-spacing: 0.01em;
     border-radius: 10px !important;
-    padding: 8px 16px !important;
+    padding: 10px 16px !important;
 }
 
 .icon-btn {
     font-weight: 500 !important;
     border-radius: 10px !important;
+    padding: 10px 14px !important;
 }
 
 .lang-btn {
@@ -1223,7 +1477,7 @@ export default {
     padding: 0 !important;
     font-size: 16px !important;
     color: #64748b !important;
-    border-radius: 50% !important;
+    border-radius: 9px !important;
     flex-shrink: 0;
 
     &:hover {
@@ -1299,7 +1553,7 @@ export default {
         content: '';
         width: 3px;
         height: 14px;
-        background: linear-gradient(135deg, #3b82f6, #7c3aed);
+        background: #2563eb;
         border-radius: 2px;
         flex-shrink: 0;
     }
@@ -1315,7 +1569,7 @@ export default {
     border: 1px solid rgba(59, 130, 246, 0.2) !important;
 
     &:hover {
-        background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
+        background: #2563eb !important;
         border-color: #3b82f6 !important;
         color: #ffffff !important;
         transform: none !important;
@@ -1339,12 +1593,60 @@ export default {
 }
 
 .premium-dropdown {
-    min-width: 340px;
+    width: 410px;
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+    max-height: min(560px, calc(100vh - 160px));
+    max-height: min(560px, calc(100dvh - 160px));
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
     padding: 8px !important;
-    border-radius: 14px !important;
-    border: 1px solid rgba(226, 232, 240, 0.9) !important;
-    box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.12), 0 6px 16px -4px rgba(0, 0, 0, 0.06) !important;
-    backdrop-filter: blur(12px);
+    border-radius: 16px !important;
+    border: 1px solid var(--border) !important;
+    box-shadow: 0 16px 48px rgba(23, 36, 59, 0.14), 0 3px 8px rgba(23, 36, 59, 0.04) !important;
+
+    ::v-deep .el-dropdown-menu__item {
+        padding: 12px 8px;
+        margin: 4px 0;
+        border: 1px solid transparent;
+        border-radius: 10px;
+        line-height: 1.5;
+
+        &:hover, &:focus {
+            background: #f1f6ff !important;
+            border-color: #dce8fd;
+        }
+    }
+}
+
+.host-search {
+    position: sticky;
+    top: -8px;
+    z-index: 1;
+    padding: 12px 8px;
+    background: #ffffff;
+    border-bottom: 1px solid #e2e8f0;
+    margin-bottom: 4px;
+    list-style: none;
+}
+
+.host-menu-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.host-count {
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: #f0f3f8;
+    color: var(--text-muted);
+    font: 11px var(--mono-font);
 }
 
 .empty-dropdown {
@@ -1377,11 +1679,12 @@ export default {
 }
 
 .item-avatar {
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #3b82f6, #7c3aed);
-    color: #ffffff;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: #edf3ff;
+    border: 1px solid #dbe7fc;
+    color: #3962a8;
     font-size: 13px;
     font-weight: 700;
     display: flex;
@@ -1414,6 +1717,7 @@ export default {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        font-family: var(--mono-font);
     }
 }
 
@@ -1453,6 +1757,22 @@ export default {
     border-radius: 12px;
 }
 
+.item-remark-row {
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+.remark-text {
+    display: inline-block;
+    font-size: 11px;
+    color: #64748b;
+    font-style: normal;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .item-meta-row {
     display: flex;
     flex-wrap: wrap;
@@ -1466,21 +1786,23 @@ export default {
     max-width: 100%;
     padding: 3px 8px;
     border-radius: 999px;
-    background: #eff6ff;
-    border: 1px solid rgba(59, 130, 246, 0.12);
-    color: #2563eb;
+    background: #f1f4f8;
+    border: 1px solid #e4eaf2;
+    color: #607089;
     font-size: 10px;
     font-weight: 600;
     line-height: 1.3;
+    overflow-wrap: anywhere;
 }
 
 .delete-btn {
-    color: #cbd5e1;
+    color: #7e8ba0;
     font-size: 14px;
     padding: 5px;
     transition: all 0.2s;
     border-radius: 6px;
     flex-shrink: 0;
+    cursor: pointer;
 
     &:hover {
         color: #ef4444;
@@ -1489,7 +1811,7 @@ export default {
 }
 
 .edit-btn {
-    color: #cbd5e1;
+    color: #7e8ba0;
     font-size: 14px;
     padding: 5px;
     transition: all 0.2s;
@@ -1509,6 +1831,8 @@ export default {
     box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.2);
     margin-top: 5vh !important;
     max-height: 90vh;
+    max-height: 90dvh;
+    max-width: calc(100vw - 24px);
     display: flex;
     flex-direction: column;
 

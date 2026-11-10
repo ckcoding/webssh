@@ -86,12 +86,17 @@ func (sclient *SSHClient) Upload(file multipart.File, id, dstPath string) error 
 		return err
 	}
 	defer dstFile.Close()
-	defer func() {
-		RemoveWriteCounter(id)
-	}()
-	wc := NewWriteCounter(id)
-	AddWriteCounter(wc)
-	_, err = io.Copy(dstFile, io.TeeReader(file, wc))
+
+	reader := io.Reader(file)
+	if strings.TrimSpace(id) != "" {
+		defer func() {
+			RemoveWriteCounter(id)
+		}()
+		wc := NewWriteCounter(id)
+		AddWriteCounter(wc)
+		reader = io.TeeReader(file, wc)
+	}
+	_, err = io.Copy(dstFile, reader)
 	if err != nil {
 		return err
 	}

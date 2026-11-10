@@ -1,14 +1,11 @@
 import Vue from 'vue'
 
 import element from '@/utils/element'
-import 'element-ui/lib/theme-chalk/index.css'
 
 import '@/styles/index.scss'
 
 import App from '@/App'
 import store from '@/store/index'
-
-import 'xterm/css/xterm.css'
 
 import i18n from './lang/index'
 

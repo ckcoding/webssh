@@ -1,18 +1,43 @@
+# Quick start:
+#   cp .env.example .env   # then set WEBSSH_AUTH_INFO and WEBSSH_SECRET_KEY
+#   docker compose up -d --build
 services:
   webssh:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # Mainland China mirrors, if needed:
+      # args:
+      #   GOPROXY: https://goproxy.cn,direct
+      #   GOSUMDB: sum.golang.google.cn
+      #   NPM_REGISTRY: https://registry.npmmirror.com
+    image: webssh:local
     container_name: webssh
     restart: unless-stopped
     ports:
-      - "5032:5032"
+      - "${WEBSSH_PORT:-5032}:5032"
     environment:
-      TZ: Asia/Shanghai
-      savePass: "true"
-      authInfo: admin:123456
+      TZ: ${TZ:-Asia/Shanghai}
+      port: "5032"
+      authInfo: ${WEBSSH_AUTH_INFO:?Set WEBSSH_AUTH_INFO=user:pass in .env (see .env.example)}
+      basePath: ${WEBSSH_BASE_PATH:-}
+      savePass: ${WEBSSH_SAVE_PASS:-true}
+      WEBSSH_SECRET_KEY: ${WEBSSH_SECRET_KEY:-}
+      WEBSSH_STRICT_HOST_KEY: ${WEBSSH_STRICT_HOST_KEY:-false}
     volumes:
       - webssh-data:/home/webssh/.config/webssh
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   webssh-data:

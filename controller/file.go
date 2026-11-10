@@ -3,8 +3,10 @@ package controller
 import (
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
+	"os"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
@@ -26,15 +28,17 @@ type File struct {
 }
 
 type createEntryRequest struct {
-	Path    string `json:"path"`
-	Name    string `json:"name"`
-	SshInfo string `json:"sshInfo"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	SshInfo   string `json:"sshInfo"`
+	SessionID string `json:"sessionId"`
 }
 
 type renameEntryRequest struct {
-	Path    string `json:"path"`
-	NewName string `json:"newName"`
-	SshInfo string `json:"sshInfo"`
+	Path      string `json:"path"`
+	NewName   string `json:"newName"`
+	SshInfo   string `json:"sshInfo"`
+	SessionID string `json:"sessionId"`
 }
 
 func detectInlineContentType(path string) string {
@@ -88,6 +92,28 @@ const (
 	// EXABYTE 艾字节
 	EXABYTE
 )
+
+const defaultMaxEditFileBytes int64 = 5 * 1024 * 1024
+
+func maxEditFileBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("WEBSSH_MAX_EDIT_FILE_BYTES"))
+	if raw == "" {
+		return defaultMaxEditFileBytes
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultMaxEditFileBytes
+	}
+	return parsed
+}
+
+func ensureEditableContentSize(size int64) error {
+	limit := maxEditFileBytes()
+	if size > limit {
+		return fmt.Errorf("file is too large to edit (max %s)", Bytefmt(uint64(limit)))
+	}
+	return nil
+}
 
 // Bytefmt 将字节数格式化为便于展示的单位字符串。
 func Bytefmt(bytes uint64) string {
@@ -180,16 +206,50 @@ func buildCreateTargetPath(dirPath, name string) (string, error) {
 	return pathpkg.Join(normalizeRemotePath(dirPath), cleanName), nil
 }
 
+func sanitizeRelativeDir(raw string) (string, error) {
+	dir := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if dir == "" {
+		return "", nil
+	}
+	parts := strings.Split(dir, "/")
+	cleanParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cleanPart, err := sanitizeCreateName(part)
+		if err != nil {
+			return "", err
+		}
+		cleanParts = append(cleanParts, cleanPart)
+	}
+	return pathpkg.Join(cleanParts...), nil
+}
+
+func buildUploadTargetPath(basePath, dir, filename string) (string, string, error) {
+	cleanFilename, err := sanitizeCreateName(filename)
+	if err != nil {
+		return "", "", err
+	}
+	cleanDir, err := sanitizeRelativeDir(dir)
+	if err != nil {
+		return "", "", err
+	}
+	targetDir := normalizeRemotePath(basePath)
+	if cleanDir != "" {
+		targetDir = pathpkg.Join(targetDir, cleanDir)
+	}
+	return pathpkg.Join(targetDir, cleanFilename), targetDir, nil
+}
+
 // UploadFile 上传文件
 func UploadFile(c *gin.Context) *ResponseBody {
 	var err error
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 	sshInfo := c.PostForm("sshInfo")
+	sessionID := c.PostForm("sessionId")
 	id := c.PostForm("id")
-	session, err := core.GetFileSession(sshInfo)
+	session, err := core.GetFileSessionByID(sessionID, sshInfo)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("file session:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -199,23 +259,23 @@ func UploadFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 	defer file.Close()
-	path := strings.TrimSpace(c.DefaultPostForm("path", "/root"))
-	pathArr := []string{strings.TrimRight(path, "/")}
+	path := c.DefaultPostForm("path", "/root")
 	dir := c.DefaultPostForm("dir", "")
-	if dir != "" {
-		pathArr = append(pathArr, dir)
+	targetPath, targetDir, err := buildUploadTargetPath(path, dir, header.Filename)
+	if err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
 	}
-	pathArr = append(pathArr, header.Filename)
 	err = session.Use(func(sshClient *core.SSHClient) error {
 		if dir != "" {
-			if err := sshClient.Mkdirs(strings.Join(pathArr[:len(pathArr)-1], "/")); err != nil {
+			if err := sshClient.Mkdirs(targetDir); err != nil {
 				return err
 			}
 		}
-		return sshClient.Upload(file, id, strings.Join(pathArr, "/"))
+		return sshClient.Upload(file, id, targetPath)
 	})
 	if err != nil {
-		fmt.Println(err)
+		log.Println("upload file:", err)
 		responseBody.Msg = err.Error()
 	}
 	return &responseBody
@@ -225,13 +285,14 @@ func UploadFile(c *gin.Context) *ResponseBody {
 func DownloadFile(c *gin.Context) *ResponseBody {
 	var err error
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 	path := strings.TrimSpace(c.DefaultQuery("path", "/root"))
 	inline := c.DefaultQuery("inline", "") == "1"
 	sshInfo := c.DefaultQuery("sshInfo", "")
-	session, err := core.GetFileSession(sshInfo)
+	sessionID := c.DefaultQuery("sessionId", "")
+	session, err := core.GetFileSessionByID(sessionID, sshInfo)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("download file session:", err)
 		responseBody.Msg = err.Error()
 		if !c.Writer.Written() {
 			c.JSON(http.StatusBadRequest, responseBody)
@@ -257,7 +318,7 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 		return err
 	})
 	if err != nil {
-		fmt.Println(err)
+		log.Println("download file:", err)
 		responseBody.Msg = err.Error()
 		if !c.Writer.Written() {
 			c.JSON(http.StatusBadRequest, responseBody)
@@ -269,10 +330,10 @@ func DownloadFile(c *gin.Context) *ResponseBody {
 // UploadProgressWs 获取上传进度ws
 func UploadProgressWs(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("upload progress ws upgrade:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -293,9 +354,10 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 		}
 	}()
 
-	// 上传协程可能稍晚注册计数器；等待最多 2 秒。
+	// 上传协程可能稍晚注册计数器；慢网络下浏览器请求体到达完成后，
+	// 后端才会开始 SFTP 写入，所以这里需要给大文件和弱网更充足的等待窗口。
 	var counter *core.WriteCounter
-	waitDeadline := time.Now().Add(2 * time.Second)
+	waitDeadline := time.Now().Add(15 * time.Second)
 	for counter == nil {
 		counter = core.FindWriteCounter(id)
 		if counter != nil {
@@ -315,7 +377,7 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 
 	writeTotal := func() error {
 		_ = wsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		return wsConn.WriteMessage(websocket.TextMessage, []byte(strconv.Itoa(counter.Total)))
+		return wsConn.WriteMessage(websocket.TextMessage, []byte(strconv.FormatInt(counter.TotalBytes(), 10)))
 	}
 
 	if err := writeTotal(); err != nil {
@@ -353,12 +415,13 @@ func UploadProgressWs(c *gin.Context) *ResponseBody {
 // FileList 获取文件列表
 func FileList(c *gin.Context) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 	path := c.DefaultQuery("path", "/root")
 	sshInfo := c.DefaultQuery("sshInfo", "")
-	session, err := core.GetFileSession(sshInfo)
+	sessionID := c.DefaultQuery("sessionId", "")
+	session, err := core.GetFileSessionByID(sessionID, sshInfo)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("file list session:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
@@ -402,14 +465,15 @@ func FileList(c *gin.Context) *ResponseBody {
 func GetFileContent(c *gin.Context) *ResponseBody {
 	var err error
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 	path := strings.TrimSpace(c.DefaultQuery("path", ""))
 	sshInfo := c.DefaultQuery("sshInfo", "")
+	sessionID := c.DefaultQuery("sessionId", "")
 	if path == "" {
 		responseBody.Msg = "path is empty"
 		return &responseBody
 	}
-	session, err := core.GetFileSession(sshInfo)
+	session, err := core.GetFileSessionByID(sessionID, sshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -420,8 +484,22 @@ func GetFileContent(c *gin.Context) *ResponseBody {
 			return err
 		}
 		defer file.Close()
-		content, err := io.ReadAll(file)
+		info, err := file.Stat()
 		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return fmt.Errorf("path is a directory")
+		}
+		if err := ensureEditableContentSize(info.Size()); err != nil {
+			return err
+		}
+		limit := maxEditFileBytes()
+		content, err := io.ReadAll(&io.LimitedReader{R: file, N: limit + 1})
+		if err != nil {
+			return err
+		}
+		if err := ensureEditableContentSize(int64(len(content))); err != nil {
 			return err
 		}
 		responseBody.Data = string(content)
@@ -439,13 +517,14 @@ func SaveFileContent(c *gin.Context) *ResponseBody {
 	var (
 		err error
 		req struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-			SshInfo string `json:"sshInfo"`
+			Path      string `json:"path"`
+			Content   string `json:"content"`
+			SshInfo   string `json:"sshInfo"`
+			SessionID string `json:"sessionId"`
 		}
 	)
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseBody.Msg = err.Error()
@@ -456,8 +535,12 @@ func SaveFileContent(c *gin.Context) *ResponseBody {
 		responseBody.Msg = "path is empty"
 		return &responseBody
 	}
+	if err := ensureEditableContentSize(int64(len(req.Content))); err != nil {
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
 
-	session, err := core.GetFileSession(req.SshInfo)
+	session, err := core.GetFileSessionByID(req.SessionID, req.SshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -486,7 +569,7 @@ func CreateFile(c *gin.Context) *ResponseBody {
 		req createEntryRequest
 	)
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseBody.Msg = err.Error()
@@ -499,7 +582,7 @@ func CreateFile(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 
-	session, err := core.GetFileSession(req.SshInfo)
+	session, err := core.GetFileSessionByID(req.SessionID, req.SshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -525,7 +608,7 @@ func CreateDirectory(c *gin.Context) *ResponseBody {
 		req createEntryRequest
 	)
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseBody.Msg = err.Error()
@@ -538,7 +621,7 @@ func CreateDirectory(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 
-	session, err := core.GetFileSession(req.SshInfo)
+	session, err := core.GetFileSessionByID(req.SessionID, req.SshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody
@@ -564,7 +647,7 @@ func RenameEntry(c *gin.Context) *ResponseBody {
 		req renameEntryRequest
 	)
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+	
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseBody.Msg = err.Error()
@@ -593,7 +676,7 @@ func RenameEntry(c *gin.Context) *ResponseBody {
 		return &responseBody
 	}
 
-	session, err := core.GetFileSession(req.SshInfo)
+	session, err := core.GetFileSessionByID(req.SessionID, req.SshInfo)
 	if err != nil {
 		responseBody.Msg = err.Error()
 		return &responseBody

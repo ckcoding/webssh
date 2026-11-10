@@ -11,8 +11,10 @@ import {
     TableColumn,
     Input,
     Message,
+    Loading,
     Container,
     Header,
+    Aside,
     Main,
     Upload,
     Dropdown,
@@ -22,7 +24,8 @@ import {
     TabPane,
     Divider,
     Tooltip,
-    DatePicker
+    DatePicker,
+    Alert
 } from 'element-ui'
 const element = {
     install: function (Vue) {
@@ -38,6 +41,7 @@ const element = {
         Vue.use(TableColumn)
         Vue.use(Container)
         Vue.use(Header)
+        Vue.use(Aside)
         Vue.use(Main)
         Vue.use(Upload)
         Vue.use(Dropdown)
@@ -48,6 +52,8 @@ const element = {
         Vue.use(Divider)
         Vue.use(Tooltip)
         Vue.use(DatePicker)
+        Vue.use(Alert)
+        Vue.use(Loading.directive)
         Vue.prototype.$message = Message
     }
 }

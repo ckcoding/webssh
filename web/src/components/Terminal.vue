@@ -5,9 +5,12 @@
 </template>
 
 <script>
+import 'xterm/css/xterm.css'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
-import { AttachAddon } from 'xterm-addon-attach'
+import { TerminalTransport } from '@/utils/terminalTransport'
+import { WebglAddon } from 'xterm-addon-webgl'
+import { buildWsURL } from '@/utils/base'
 import { buildHistoryItem, decodeSSHList, encodeSSHList, isSameSSH } from '@/utils/ssh'
 
 export default {
@@ -15,9 +18,6 @@ export default {
     props: ['id'],
     data() {
         return {
-            term: null,
-            fitAddon: null,
-            ws: null,
             resetClose: false,
             ssh: null,
             reconnectSSH: null,
@@ -29,10 +29,20 @@ export default {
             resizeSyncTimer: null,
             wheelEventName: '',
             wheelHandler: null,
-            autoReconnectAttempts: 0,
-            autoReconnectTimer: null,
-            autoReconnectMax: 6
+
         }
+    },
+    created() {
+        // xterm and its renderer mutate large object graphs on every frame.
+        // Keep runtime objects outside Vue 2 observation and DOM rendering.
+        this.term = null
+        this.fitAddon = null
+        this.ws = null
+        this.resizeObserver = null
+        this.resizeFrame = null
+        this.lastResizeDimensions = ''
+        this.lastContainerSize = ''
+        this.sessionId = ''
     },
     mounted() {
         this.createTerm()
@@ -42,10 +52,11 @@ export default {
             const ssh = this.ssh || this.reconnectSSH
             if (ssh !== null) {
                 this.$store.commit('SET_SSH', ssh)
+                this.$store.commit('SET_CONNECTION_SESSION_ID', this.sessionId)
             }
         },
         fitTerminal() {
-            if (this.fitAddon === null) {
+            if (this.fitAddon === null || !this.isVisible()) {
                 return
             }
             try {
@@ -54,8 +65,12 @@ export default {
                 // 容器尺寸尚未稳定时跳过一次 fit，后续 resize 会自动补齐。
             }
         },
+        isVisible() {
+            const host = document.getElementById(this.id)
+            return Boolean(host && host.offsetWidth > 0 && host.offsetHeight > 0)
+        },
         focusTerminal() {
-            if (this.term !== null) {
+            if (this.term !== null && this.isVisible()) {
                 this.term.focus()
             }
         },
@@ -125,33 +140,52 @@ export default {
             }
             this.fontSize = nextSize
             this.term.setOption('fontSize', this.fontSize)
+            this.lastContainerSize = ''
             this.scheduleResizeSync(0)
         },
         sendResize() {
-            if (this.ws !== null && this.ws.readyState === 1 && this.term !== null) {
-                this.ws.send(`resize:${this.term.rows}:${this.term.cols}`)
+            if (this.ws !== null && this.ws.readyState === 1 && this.term !== null && this.isVisible()) {
+                const dimensions = `${this.term.rows}:${this.term.cols}`
+                if (dimensions !== this.lastResizeDimensions) {
+                    this.ws.send(`resize:${dimensions}`)
+                    this.lastResizeDimensions = dimensions
+                }
             }
         },
-        scheduleResizeSync(delay = 60) {
-            if (this.resizeSyncTimer !== null) {
-                window.clearTimeout(this.resizeSyncTimer)
+        scheduleResizeSync(delay = 40) {
+            if (this.resizeSyncTimer !== null || this.resizeFrame !== null) {
+                return
             }
             this.resizeSyncTimer = window.setTimeout(() => {
                 this.resizeSyncTimer = null
-                const termWeb = document.getElementById(this.id)
-                if (!termWeb || this.term === null) {
-                    return
-                }
-                this.resizeTerm(termWeb)
-                this.fitTerminal()
-                this.sendResize()
+                this.resizeFrame = window.requestAnimationFrame(() => {
+                    this.resizeFrame = null
+                    const termWeb = document.getElementById(this.id)
+                    if (!termWeb || this.term === null || !this.isVisible()) {
+                        return
+                    }
+                    const rect = termWeb.parentElement.getBoundingClientRect()
+                    const size = `${Math.floor(rect.width)}:${Math.floor(rect.height)}`
+                    if (size !== this.lastContainerSize) {
+                        this.lastContainerSize = size
+                        this.resizeTerm(termWeb)
+                        this.fitTerminal()
+                    }
+                    this.sendResize()
+                })
             }, delay)
+        },
+        deactivate() {
+            if (this.term !== null) {
+                this.term.setOption('cursorBlink', false)
+            }
         },
         activate() {
             const termWeb = document.getElementById(this.id)
             if (!termWeb || this.term === null || this.fitAddon === null) {
                 return
             }
+            this.term.setOption('cursorBlink', true)
             this.$nextTick(() => {
                 this.scheduleResizeSync(0)
                 this.focusTerminal()
@@ -162,8 +196,10 @@ export default {
             if (container === null) {
                 return
             }
-            const height = Math.max(260, Math.floor(container.getBoundingClientRect().height))
-            termWeb.style.height = `${height}px`
+            const height = Math.max(0, Math.floor(container.getBoundingClientRect().height))
+            if (termWeb.style.height !== `${height}px`) {
+                termWeb.style.height = `${height}px`
+            }
         },
         createTerm() {
             if (this.$store.state.sshInfo.password === '') {
@@ -176,17 +212,19 @@ export default {
             }
             this.resizeTerm(termWeb)
             const sshReq = this.$store.getters.sshReq
+            const sessionId = this.$store.getters.sshSessionId
             this.close()
+            this.sessionId = sessionId
+            this.ssh = sshSnapshot
             this.reconnectSSH = sshSnapshot
             this.reconnectReady = false
-            const prefix = process.env.NODE_ENV === 'production' ? '' : '/ws'
             this.fitAddon = new FitAddon()
             this.term = new Terminal({
                 fontFamily: "'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
                 fontSize: this.fontSize,
                 lineHeight: 1.18,
                 scrollback: 10000,
-                cursorBlink: true,
+                cursorBlink: this.isVisible(),
                 convertEol: true,
                 fastScrollModifier: 'shift',
                 fastScrollSensitivity: 5,
@@ -216,6 +254,13 @@ export default {
             })
             this.term.loadAddon(this.fitAddon)
             this.term.open(document.getElementById(this.id))
+            try {
+                const webgl = new WebglAddon()
+                webgl.onContextLoss(() => { webgl.dispose() })
+                this.term.loadAddon(webgl)
+            } catch (e) {
+                // WebGL unavailable, fall back to canvas renderer
+            }
             this.fitTerminal()
             this.focusTerminal()
             const self = this
@@ -224,18 +269,21 @@ export default {
                 closeTip = 'Connection timed out!'
             }
             const wsParams = {
-                sshInfo: sshReq,
                 rows: this.term.rows,
                 cols: this.term.cols,
-                closeTip
+                closeTip,
+                flowControl: 1
+            }
+            if (sessionId) {
+                wsParams.sessionId = sessionId
+            } else {
+                wsParams.sshInfo = sshReq
             }
             const token = localStorage.getItem('webssh_token')
             if (token) {
                 wsParams.token = token
             }
-            const wsQuery = new URLSearchParams(wsParams).toString()
-            const wsProtocol = location.protocol === 'http:' ? 'ws' : 'wss'
-            const wsUrl = `${wsProtocol}://${location.host}${prefix}/term?${wsQuery}`
+            const wsUrl = buildWsURL('/term', wsParams)
 
             this.ws = new WebSocket(wsUrl)
             this.ws.binaryType = 'arraybuffer'
@@ -244,14 +292,9 @@ export default {
                 if (self.ws !== activeWs) {
                     return
                 }
-                self.cancelAutoReconnect()
-                self.autoReconnectAttempts = 0
-                self.connected()
+                self.connected(sshSnapshot)
                 self.sendResize()
                 self.focusTerminal()
-                if (self.term !== null) {
-                    self.term.write('\r\n\u001B[32m✓ 连接成功\u001B[0m\r\n')
-                }
             }
             this.ws.onclose = () => {
                 if (self.ws !== activeWs) {
@@ -259,17 +302,11 @@ export default {
                 }
                 if (!self.resetClose) {
                     this.ws = null
-                    const hadConnected = self.ssh !== null
-                    if (hadConnected && self.hasReconnectSSH() && self.autoReconnectAttempts < self.autoReconnectMax) {
-                        self.scheduleAutoReconnect()
-                        return
-                    }
                     self.onFinalDisconnect()
                 }
                 self.resetClose = false
             }
-            const attachAddon = new AttachAddon(this.ws)
-            this.term.loadAddon(attachAddon)
+            this.term.loadAddon(new TerminalTransport(this.ws))
             this.term.attachCustomKeyEventHandler((e) => {
                 if (self.reconnectReady) {
                     if (e.type === 'keydown' && e.key === 'Enter') {
@@ -333,8 +370,8 @@ export default {
                     e.preventDefault()
                     self.fontSize = 15
                     self.term.setOption('fontSize', self.fontSize)
-                    self.fitTerminal()
-                    self.sendResize()
+                    self.lastContainerSize = ''
+                    self.scheduleResizeSync(0)
                     return false
                 }
                 if ((e.ctrlKey || e.metaKey) && e.shiftKey && lowerKey === 'l' && isKeydown) {
@@ -357,42 +394,15 @@ export default {
                 self.scheduleResizeSync()
             }
             window.addEventListener('resize', this.resizeHandler)
+            if (typeof window.ResizeObserver === 'function') {
+                this.resizeObserver = new window.ResizeObserver(this.resizeHandler)
+                this.resizeObserver.observe(termWeb.parentElement)
+            }
         },
         hasReconnectSSH() {
             return this.reconnectSSH !== null && this.reconnectSSH.password !== undefined && this.reconnectSSH.password !== ''
         },
-        cancelAutoReconnect() {
-            if (this.autoReconnectTimer !== null) {
-                window.clearTimeout(this.autoReconnectTimer)
-                this.autoReconnectTimer = null
-            }
-        },
-        scheduleAutoReconnect() {
-            this.cancelAutoReconnect()
-            this.autoReconnectAttempts += 1
-            const attempt = this.autoReconnectAttempts
-            const delay = Math.min(30000, 1000 * Math.pow(2, attempt - 1))
-            const message = this.$t('terminalAutoReconnecting', { n: attempt, total: this.autoReconnectMax })
-            if (this.term !== null) {
-                this.term.write(`\r\n\u001B[33m${message}\u001B[0m\r\n`)
-            }
-            this.autoReconnectTimer = window.setTimeout(() => {
-                this.autoReconnectTimer = null
-                if (!this.hasReconnectSSH()) {
-                    this.onFinalDisconnect()
-                    return
-                }
-                const snapshot = Object.assign({}, this.reconnectSSH)
-                this.$store.commit('SET_SSH', snapshot)
-                this.$nextTick(() => {
-                    this.createTerm()
-                })
-            }, delay)
-        },
         onFinalDisconnect() {
-            this.cancelAutoReconnect()
-            const exhausted = this.autoReconnectAttempts >= this.autoReconnectMax
-            this.autoReconnectAttempts = 0
             if (!this.savePass) {
                 const activeSSH = this.$store.state.sshInfo || {}
                 const closedSSH = this.ssh || this.reconnectSSH
@@ -402,9 +412,7 @@ export default {
             }
             this.closeDisconnectMessage()
             this.disconnectMessage = this.$message({
-                message: exhausted
-                    ? this.$t('terminalAutoReconnectFailed', { total: this.autoReconnectMax })
-                    : this.$t('wsClose'),
+                message: this.$t('wsClose'),
                 type: 'warning',
                 duration: 0,
                 showClose: true
@@ -433,21 +441,31 @@ export default {
                 this.createTerm()
             })
         },
-        connected() {
-            const sshInfo = this.$store.state.sshInfo
+        connected(sshInfo = this.ssh || this.reconnectSSH) {
             this.ssh = Object.assign({}, sshInfo)
             this.reconnectSSH = Object.assign({}, sshInfo)
             this.reconnectReady = false
             this.closeDisconnectMessage()
             this.savePass = this.$store.state.savePass
-            document.title = sshInfo.host ? `${sshInfo.host} - WebSSH` : 'WebSSH'
+            if (this.isVisible()) {
+                document.title = sshInfo.host ? `${sshInfo.host} - WebSSH` : 'WebSSH'
+            }
             const sshList = decodeSSHList(this.$store.state.sshList)
                 .filter(item => !isSameSSH(item, sshInfo))
             sshList.push(buildHistoryItem(sshInfo, this.savePass))
             this.$store.commit('SET_LIST', encodeSSHList(sshList))
         },
         close() {
-            this.cancelAutoReconnect()
+            if (this.resizeObserver !== null) {
+                this.resizeObserver.disconnect()
+                this.resizeObserver = null
+            }
+            if (this.resizeFrame !== null) {
+                window.cancelAnimationFrame(this.resizeFrame)
+                this.resizeFrame = null
+            }
+            this.lastResizeDimensions = ''
+            this.lastContainerSize = ''
             const termWeb = document.getElementById(this.id)
             if (termWeb !== null && this.wheelEventName !== '' && this.wheelHandler !== null) {
                 termWeb.removeEventListener(this.wheelEventName, this.wheelHandler)

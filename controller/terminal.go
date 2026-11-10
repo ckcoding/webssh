@@ -1,7 +1,8 @@
 package controller
 
 import (
-	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,8 +15,8 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  8192,
-	WriteBufferSize: 8192,
+	ReadBufferSize:  32768,
+	WriteBufferSize: 32768,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -25,42 +26,91 @@ var upgrader = websocket.Upgrader{
 		if err != nil {
 			return false
 		}
-		return strings.EqualFold(originURL.Host, r.Host)
+		if sameRequestHost(originURL.Host, r.Host) {
+			return true
+		}
+		return sameRequestHost(originURL.Host, firstForwardedHost(r.Header.Get("X-Forwarded-Host")))
 	},
 	EnableCompression: true,
+}
+
+func firstForwardedHost(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(value, ",")[0])
+}
+
+func sameRequestHost(originHost, requestHost string) bool {
+	originHost = strings.TrimSpace(originHost)
+	requestHost = strings.TrimSpace(requestHost)
+	if originHost == "" || requestHost == "" {
+		return false
+	}
+	if strings.EqualFold(originHost, requestHost) {
+		return true
+	}
+	return strings.EqualFold(hostnameOnly(originHost), hostnameOnly(requestHost))
+}
+
+func hostnameOnly(value string) string {
+	if value == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	if parsed := strings.Trim(value, "[]"); strings.Count(parsed, ":") == 0 {
+		return parsed
+	}
+	return value
 }
 
 // TermWs 获取终端ws
 func TermWs(c *gin.Context, timeout time.Duration) *ResponseBody {
 	responseBody := ResponseBody{Msg: "success"}
-	defer TimeCost(time.Now(), &responseBody)
+
 	sshInfo := c.DefaultQuery("sshInfo", "")
+	sessionID := c.DefaultQuery("sessionId", "")
 	cols := c.DefaultQuery("cols", "150")
 	rows := c.DefaultQuery("rows", "35")
 	closeTip := c.DefaultQuery("closeTip", "Connection timed out!")
 	col, _ := strconv.Atoi(cols)
 	row, _ := strconv.Atoi(rows)
-	sshClient, err := core.DecodedMsgToSSHClient(sshInfo)
+	sshClient, _, err := core.ResolveSSHClient(sessionID, sshInfo)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("resolve ssh client:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
 	wsConn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		fmt.Println(err)
+		log.Println("websocket upgrade:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	err = sshClient.GenerateClient()
+	wsConn.EnableWriteCompression(true)
+	wsConn.SetCompressionLevel(1)
+	if prepared := core.TakePreparedTerminalConnection(sessionID); prepared != nil {
+		sshClient = *prepared
+	} else {
+		err = sshClient.GenerateClient()
+	}
 	if err != nil {
 		wsConn.WriteMessage(1, []byte(err.Error()))
 		wsConn.Close()
-		fmt.Println(err)
+		log.Println("ssh generate client:", err)
 		responseBody.Msg = err.Error()
 		return &responseBody
 	}
-	sshClient.InitTerminal(wsConn, row, col)
+	if err := sshClient.InitTerminal(wsConn, row, col, c.Query("flowControl") == "1"); err != nil {
+		wsConn.WriteMessage(websocket.TextMessage, []byte(err.Error()))
+		wsConn.Close()
+		sshClient.Close()
+		log.Println("ssh init terminal:", err)
+		responseBody.Msg = err.Error()
+		return &responseBody
+	}
 	sshClient.Connect(wsConn, timeout, closeTip)
 	return &responseBody
 }

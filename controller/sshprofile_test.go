@@ -96,15 +96,28 @@ func TestSavedSSHEndpoints(t *testing.T) {
 		"logintype":   0,
 	}
 	updated := performSavedSSHRequest(t, router, http.MethodPost, "/ssh/saved", updatePayload)
-	if updated.Msg != "success" {
-		t.Fatalf("expected update success, got %q", updated.Msg)
+	if updated.Msg != "saved ssh already exists" {
+		t.Fatalf("expected duplicate warning, got %q", updated.Msg)
 	}
 	updatedList := decodeSavedSSHList(t, updated)
 	if len(updatedList) != 1 {
-		t.Fatalf("expected update to keep 1 saved profile, got %d", len(updatedList))
+		t.Fatalf("expected duplicate save to keep 1 saved profile, got %d", len(updatedList))
+	}
+	if updatedList[0].ID != createdList[0].ID || updatedList[0].Password != "secret" {
+		t.Fatalf("expected duplicate save to keep original profile, got %+v", updatedList[0])
+	}
+
+	updatePayload["id"] = createdList[0].ID
+	updated = performSavedSSHRequest(t, router, http.MethodPost, "/ssh/saved", updatePayload)
+	if updated.Msg != "success" {
+		t.Fatalf("expected edit success, got %q", updated.Msg)
+	}
+	updatedList = decodeSavedSSHList(t, updated)
+	if len(updatedList) != 1 {
+		t.Fatalf("expected edit to keep 1 saved profile, got %d", len(updatedList))
 	}
 	if updatedList[0].ID != createdList[0].ID {
-		t.Fatalf("expected update to reuse profile id")
+		t.Fatalf("expected edit to reuse profile id")
 	}
 	if updatedList[0].Password != "changed" {
 		t.Fatalf("expected updated password to be returned")
@@ -113,7 +126,30 @@ func TestSavedSSHEndpoints(t *testing.T) {
 		t.Fatalf("expected updated metadata to be returned, got %+v", updatedList[0])
 	}
 
-	deleted := performSavedSSHRequest(t, router, http.MethodDelete, "/ssh/saved/"+createdList[0].ID, nil)
+	editIdentityPayload := map[string]interface{}{
+		"id":        createdList[0].ID,
+		"host":      "192.168.1.3",
+		"username":  "ubuntu",
+		"port":      2222,
+		"password":  "rotated",
+		"logintype": 0,
+	}
+	edited := performSavedSSHRequest(t, router, http.MethodPost, "/ssh/saved", editIdentityPayload)
+	if edited.Msg != "success" {
+		t.Fatalf("expected identity edit success, got %q", edited.Msg)
+	}
+	editedList := decodeSavedSSHList(t, edited)
+	if len(editedList) != 1 {
+		t.Fatalf("expected identity edit to keep 1 saved profile, got %d", len(editedList))
+	}
+	if editedList[0].ID == createdList[0].ID {
+		t.Fatalf("expected identity edit to return a new fingerprint id")
+	}
+	if editedList[0].Host != "192.168.1.3" || editedList[0].Username != "ubuntu" || editedList[0].Port != 2222 || editedList[0].Password != "rotated" {
+		t.Fatalf("expected edited identity fields to be returned, got %+v", editedList[0])
+	}
+
+	deleted := performSavedSSHRequest(t, router, http.MethodDelete, "/ssh/saved/"+editedList[0].ID, nil)
 	if deleted.Msg != "success" {
 		t.Fatalf("expected delete success, got %q", deleted.Msg)
 	}

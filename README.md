@@ -2,21 +2,28 @@
 
 [![License](https://img.shields.io/badge/license-GPL%20V3-blue.svg?longCache=true)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 
-基于 Go + Vue 2 的 Web SSH / SFTP 工具，提供浏览器终端、主机管理、文件浏览与在线编辑能力。
+基于 Go + Vue 2 的 Web SSH / SFTP 工具：浏览器终端、主机管理、文件浏览与在线编辑，前端打包后嵌入单个二进制。
 
 ## 截图
 
-![终端预览](images/WX20260411-124130@2x.png)
-![文件管理](images/WX20260411-124248@2x.png)
+> 截图使用本地临时演示主机（Docker 容器 `demo-server` / `staging-db`）拍摄，不含真实服务器信息。
+
+| 登录 | 新建主机 |
+| --- | --- |
+| ![登录页](images/01-login.png) | ![新建主机](images/02-new-host.png) |
+| **终端与状态监控** | **主机列表** |
+| ![终端](images/03-terminal.png) | ![主机列表](images/04-host-list.png) |
+| **文件管理** | **在线编辑** |
+| ![文件管理](images/05-files.png) | ![在线编辑](images/06-editor.png) |
 
 ## 功能概览
 
-- 浏览器终端：基于 WebSocket，支持 ANSI 色彩、特殊字符和多标签页。
-- 主机管理：保存 SSH 主机配置，支持下次快速连接。
-- 文件管理：支持目录浏览、上传、下载、新建和删除。
-- 在线编辑：浏览器内编辑文本文件，支持 `Ctrl+S` / `Cmd+S` 保存。
-- 基础监控：展示 CPU、内存、磁盘和系统信息。
-- 登录鉴权：支持 `-a user:pass` 或 `authInfo=user:pass` 开启 Web 访问认证。
+- **浏览器终端**：基于 WebSocket + xterm.js，多标签页、ANSI 色彩、断线重连、快捷键。
+- **主机管理**：保存 SSH 主机配置（可选加密存储），可为主机补充公网 IP、地区、系统、内存、到期时间等元数据。
+- **文件管理**：SFTP 目录浏览、上传、下载、新建、删除，浏览器内编辑文本文件（`Ctrl+S` / `Cmd+S` 保存）。
+- **基础监控**：CPU、内存、磁盘、系统信息与运行时长。
+- **登录鉴权**：`-a user:pass` 或环境变量 `authInfo` 开启 Web 访问认证。
+- **中英文界面**。
 
 ## 技术栈
 
@@ -24,64 +31,87 @@
 | --- | --- |
 | 前端 | Vue 2、Element UI、xterm.js |
 | 后端 | Go、Gin、gorilla/websocket |
-| 通信 | HTTP API、WebSocket |
-| 远程能力 | SSH、SFTP |
+| 远程能力 | SSH、SFTP（golang.org/x/crypto/ssh、pkg/sftp） |
 
-## 部署前提
+```
++---------+   http / websocket   +--------+     ssh / sftp     +------------+
+| browser | <==================> | webssh | <================> | ssh server |
++---------+                      +--------+                    +------------+
+```
 
-按部署方式准备环境：
+## 快速开始：Docker Compose（推荐）
 
-| 场景 | 依赖 |
-| --- | --- |
-| Docker 部署 | Docker / Docker Compose |
-| 宿主机部署 | Go 1.23+、Node.js 20+、npm |
-| 本地一键脚本 | Go 1.23+、Node.js 20+、npm |
-
-说明：
-
-- 后端会把前端静态文件嵌入二进制，因此宿主机编译前必须先执行前端构建。
-- 默认监听端口为 `5032`。
-- 建议始终启用登录鉴权，不要直接暴露未鉴权实例到公网。
-
-## 推荐部署：Docker
-
-出于安全考虑，请自行从源码构建，不要直接使用来源不明的预构建镜像。
+只需要 Docker 和 Docker Compose v2：
 
 ```bash
-docker build --no-cache -f docker/Dockerfile -t webssh:local .
+git clone <本仓库地址> webssh && cd webssh
+cp .env.example .env          # 修改 WEBSSH_AUTH_INFO，建议同时设置 WEBSSH_SECRET_KEY
+docker compose up -d --build
+```
 
-docker run -d \
-  --name webssh \
-  --restart unless-stopped \
+浏览器访问 `http://<宿主机>:5032/`。`docker-compose.yaml` 要求必须设置 `WEBSSH_AUTH_INFO`，避免无鉴权实例被直接暴露。
+
+镜像特性：
+
+- 多阶段构建（Node 构建前端 → Go 编译静态二进制 → Alpine 运行），最终镜像只包含一个二进制。
+- 以非 root 用户（uid 10001）运行，compose 中默认只读根文件系统、丢弃全部 capability。
+- 内置 `HEALTHCHECK`，探测 `/api/status`（该接口无需登录），并跟随 `port` / `basePath` 变量。
+- 已保存的主机配置持久化在 `webssh-data` 卷（容器内 `/home/webssh/.config/webssh`）。
+
+常用命令：
+
+```bash
+docker compose logs -f webssh
+docker compose ps            # STATUS 中可看到 healthy
+docker compose down          # 保留数据卷；加 -v 会一并删除已保存的主机
+```
+
+国内网络可在 `docker-compose.yaml` 的 `build.args` 中启用 `GOPROXY` / `NPM_REGISTRY` 镜像源。
+
+### 仅用 Docker
+
+```bash
+docker build -f docker/Dockerfile -t webssh:local .
+
+docker run -d --name webssh --restart unless-stopped \
   -p 5032:5032 \
-  -e TZ=Asia/Shanghai \
-  -e savePass=true \
-  -e authInfo=admin:123456 \
+  -e authInfo='admin:change-me' \
+  -e WEBSSH_SECRET_KEY="$(openssl rand -hex 32)" \
   -v webssh-data:/home/webssh/.config/webssh \
   webssh:local
 ```
 
-启动后访问 `http://127.0.0.1:5032/`。
+> 注意：`WEBSSH_SECRET_KEY` 用于加密已保存的主机配置，重建容器时必须使用同一个值，否则旧配置无法解密。上面的写法仅作示例，实际请把密钥固定保存下来。
 
-### Docker Compose
-
-仓库根目录已提供 [`docker-compose.yaml`](docker-compose.yaml)，可直接编译并启动：
+多架构镜像：
 
 ```bash
-docker compose up -d --build
+docker buildx build --platform linux/amd64,linux/arm64 -f docker/Dockerfile -t <registry>/webssh:latest --push .
 ```
 
+## 配置
 
-### 环境变量
+命令行参数与环境变量等价，二者同时存在时命令行参数优先。
 
-| 变量 | 说明 | 默认值 |
-| --- | --- | --- |
-| `port` | 服务端口 | `5032` |
-| `savePass` | 是否允许保存 SSH 密码 | `true` |
-| `authInfo` | Web 登录认证，格式 `user:pass` | 未启用 |
-| `TZ` | 时区 | `Asia/Shanghai` |
+| 环境变量 | 命令行 | 说明 | 默认值 |
+| --- | --- | --- | --- |
+| `port` | `-p` | 监听端口 | `5032` |
+| `authInfo` | `-a` | Web 登录账号，格式 `user:pass`；为空则不启用鉴权 | 空 |
+| `basePath` / `BASE_PATH` | `-b` | URL 前缀，反向代理到子路径时使用，如 `/webssh` | 空 |
+| `savePass` | `-s` | 是否允许保存 SSH 密码 | `true` |
+| — | `-t` | SSH 会话超时（分钟） | `120` |
+| `WEBSSH_SECRET_KEY` | — | 加密已保存主机配置的密钥（任意长字符串） | 空（明文存储） |
+| `WEBSSH_PROFILE_FILE` | — | 主机配置文件路径 | 用户配置目录下 `webssh/ssh_profiles.json`（Linux 为 `~/.config/webssh/`） |
+| `WEBSSH_STRICT_HOST_KEY` | — | 校验 SSH 主机指纹（`true` 时使用 known_hosts） | `false` |
+| `WEBSSH_KNOWN_HOSTS` | — | known_hosts 路径 | `~/.ssh/known_hosts` |
+| `WEBSSH_MAX_EDIT_FILE_BYTES` | — | 在线编辑允许的最大文件字节数 | `5242880`（5 MiB） |
+| `TZ` | — | 时区 | 镜像内 `Asia/Shanghai` |
 
-## 宿主机部署
+`docker-compose.yaml` 读取 `.env` 中的 `WEBSSH_*` 变量再映射为上表变量，完整示例见 [`.env.example`](.env.example)。
+
+## 从源码构建（不使用 Docker）
+
+依赖：Go 1.23+、Node.js 20+（已在 Node 22 上验证）、npm。后端通过 `go:embed` 嵌入 `web/dist`，所以必须先构建前端。
 
 ```bash
 cd web
@@ -89,26 +119,35 @@ npm ci
 npm run build
 cd ..
 
-go build -trimpath -o webssh_server .
-./webssh_server -a admin:123456 -p 5032 -s
+go build -trimpath -ldflags="-s -w" -o webssh .
+./webssh -a admin:change-me -p 5032
 ```
 
-可选参数：
+前端开发模式（代理到本地 5032 后端，端口 8257）：
 
-```text
--a string  启用登录验证，格式为 user:pass
--p int     服务端口，默认 5032
--t int     SSH 会话超时分钟数，默认 120
--s         是否保存 SSH 密码，默认 true
--v         输出版本信息
+```bash
+cd web && npm run serve
+```
+
+## 测试
+
+```bash
+go test ./...
+cd web && npm test
 ```
 
 ## 安全建议
 
-- 始终从当前仓库源码自行构建镜像或二进制。
-- 生产环境务必启用 `-a user:pass` 登录保护。
-- 建议放在 Nginx / Caddy 后面，通过 HTTPS 暴露。
-- 不要使用来源不明的第三方镜像或可执行文件。
+- 公网部署务必开启 `authInfo`，并放在 Nginx / Caddy 等 HTTPS 反向代理之后。
+- 保存密码时请设置 `WEBSSH_SECRET_KEY`；需要防中间人时开启 `WEBSSH_STRICT_HOST_KEY` 并挂载 known_hosts。
+- 自行从源码构建镜像，不要使用来源不明的二进制或镜像。
+
+## 隐私说明
+
+- 主机信息面板会请求 [ipwho.is](https://ipwho.is) 查询被连接服务器公网 IP 的地理位置。
+- 在线编辑器（Monaco）从 `cdnjs.cloudflare.com` 加载。
+
+内网或离线环境中，这两项请求会失败，但不影响终端和文件功能。
 
 ## 致谢
 

@@ -1,15 +1,27 @@
-# Ignore node_modules
-node_modules/
-web/node_modules/
-
-# Ignore local builds
-dist/
-web/dist/
-result/
-*.log
-
-# Ignore OS junk
-.DS_Store
-
-# Ignore git
+# Only the sources needed by docker/Dockerfile go into the build context.
 .git/
+.github/
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+.DS_Store
+.idea/
+.vscode/
+
+result/
+images/
+docs/
+README*.md
+docker-compose*.yaml
+docker-compose*.yml
+
+web/node_modules/
+web/dist/
+web/tests/
+
+/webssh
+/webssh_*

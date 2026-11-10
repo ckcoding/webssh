@@ -18,12 +18,37 @@
         </el-tabs>
         
         <div v-else class="empty-state">
-            <div class="empty-content">
-                <img src="@/assets/empty_terminal.png" :alt="$t('emptyTerminalAlt')" class="empty-image" />
-                <div class="empty-title">{{ $t('waitingConnection') }}</div>
-                <div class="empty-subtitle">{{ $t('connectUsingControls') }}</div>
+            <div class="welcome-workspace">
+                <div class="welcome-main">
+                    <div class="empty-content">
+                        <div class="workspace-eyebrow"><span></span> REMOTE WORKSPACE</div>
+                        <h1 class="empty-title"><span>{{ $t('workspaceTitle') }}</span><span>{{ $t('workspaceTitleAccent') }}</span></h1>
+                        <p class="empty-subtitle">{{ $t('workspaceDescription') }}</p>
+                        <div class="welcome-actions">
+                            <el-button type="primary" icon="el-icon-plus" @click="$emit('new-connection')">{{ $t('NewHost') }}</el-button>
+                            <el-button icon="el-icon-menu" @click="$emit('show-hosts')">{{ $t('SavedSSH') }}<span class="welcome-count">{{ $store.state.savedSSHList.length }}</span></el-button>
+                        </div>
+                    </div>
+                    <div class="terminal-preview" aria-hidden="true">
+                        <div class="preview-toolbar"><div class="preview-dots"><span></span><span></span><span></span></div><span>webssh — workspace</span><i class="el-icon-full-screen"></i></div>
+                        <div class="preview-code">
+                            <div class="preview-comment"># {{ $t('previewTerminalHint') }}</div>
+                            <div><span class="preview-prompt">❯</span> ssh <span class="preview-user">root</span><span class="preview-host">@your-server</span></div>
+                            <div class="preview-divider"></div>
+                            <div class="preview-line"><i class="el-icon-key"></i> SSH</div>
+                            <div class="preview-line"><i class="el-icon-folder-opened"></i> SFTP</div>
+                            <div class="preview-line"><i class="el-icon-data-line"></i> {{ $t('liveMetrics') }}</div>
+                            <div class="preview-cursor">❯ <span></span></div>
+                        </div>
+                        <div class="preview-footer"><span>SSH / SFTP</span><span>WebSSH</span></div>
+                    </div>
+                </div>
+                <div class="workspace-features">
+                    <div class="workspace-feature"><i class="el-icon-monitor"></i><div><strong>{{ $t('terminal') }}</strong><p>{{ $t('terminalFeature') }}</p></div></div>
+                    <div class="workspace-feature"><i class="el-icon-folder-opened"></i><div><strong>{{ $t('FileBrowser') }}</strong><p>{{ $t('filesFeature') }}</p></div></div>
+                    <div class="workspace-feature"><i class="el-icon-data-line"></i><div><strong>{{ $t('liveMetrics') }}</strong><p>{{ $t('metricsFeature') }}</p></div></div>
+                </div>
             </div>
-            <div class="glow-effect"></div>
         </div>
 
         <div v-show="contextMenuVisible">
@@ -47,13 +72,12 @@
 <script>
 import Sortable from 'sortablejs'
 import screenfull from 'screenfull'
-import Terminal from '@/components/Terminal'
 import { MessageBox } from 'element-ui'
 
 export default {
     name: 'Tabs',
     components: {
-        terminal: Terminal
+        terminal: () => import(/* webpackChunkName: "terminal" */ '@/components/Terminal')
     },
     data () {
         return {
@@ -85,7 +109,11 @@ export default {
                 document.body.removeEventListener('click', this.closeContextMenu)
             }
         },
-        currentTerm() {
+        currentTerm(next, previous) {
+            const previousTerm = this.getTermRef(previous)
+            if (previousTerm && typeof previousTerm.deactivate === 'function') {
+                previousTerm.deactivate()
+            }
             this.$nextTick(() => {
                 this.activateCurrentTerm()
             })
@@ -248,7 +276,7 @@ export default {
             }
             this.termList.push({
                 name: `${sshInfo.host}-${this.genID(5)}`,
-                label: sshInfo.host,
+                label: sshInfo.alias || sshInfo.host,
                 path: '/',
                 closable: true
             })
@@ -421,6 +449,8 @@ export default {
     flex-direction: column;
     background: transparent;
     min-height: 0;
+    padding: 20px 24px;
+    box-sizing: border-box;
 }
 
 .custom-tabs {
@@ -428,19 +458,18 @@ export default {
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: rgba(255, 255, 255, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.9);
-    border-radius: 24px;
-    box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.8) inset;
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
+    background: #0f172a;
+    border: 1px solid #d8e0ed;
+    border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(23, 36, 59, 0.08);
     overflow: hidden;
 }
 
 .custom-tabs ::v-deep .el-tabs__header {
+    flex-shrink: 0;
     margin: 0;
-    padding: 8px 12px 0;
-    background: rgba(255, 255, 255, 0.78);
+    padding: 10px 12px 0;
+    background: #eef2f7;
     border-bottom: 1px solid rgba(226, 232, 240, 0.85);
 }
 
@@ -461,8 +490,8 @@ export default {
     padding: 0 34px 0 12px !important;
     border: 1px solid rgba(226, 232, 240, 0.72) !important;
     border-bottom: 0 !important;
-    border-radius: 12px 12px 0 0;
-    background: rgba(241, 245, 249, 0.88);
+    border-radius: 8px 8px 0 0;
+    background: #e8edf5;
     color: #475569;
     max-width: 220px;
 }
@@ -471,6 +500,7 @@ export default {
     background: #ffffff;
     color: #0f172a;
     border-color: rgba(203, 213, 225, 0.95) !important;
+    box-shadow: inset 0 2px 0 var(--accent);
 }
 
 .custom-tabs ::v-deep .el-tabs__item:hover {
@@ -536,59 +566,205 @@ export default {
     white-space: nowrap;
 }
 
+/* The welcome screen shares the workspace palette with connected sessions. */
 .empty-state {
-    flex-grow: 1;
+    flex: 1;
+    min-height: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    position: relative;
-    overflow: hidden;
+    overflow: auto;
+    padding: 28px;
 }
 
-.empty-content {
-    text-align: center;
-    z-index: 10;
+.welcome-workspace {
+    width: 100%;
+    max-width: 1080px;
+    margin: auto;
 }
 
-.empty-image {
-    max-width: 420px;
-    height: auto;
-    opacity: 0.9;
-    margin-bottom: 12px;
-    filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.04));
-    mix-blend-mode: multiply;
-    mask-image: radial-gradient(circle, black 50%, transparent 95%);
-    -webkit-mask-image: radial-gradient(circle, black 50%, transparent 95%);
+.welcome-main {
+    display: grid;
+    grid-template-columns: 1.05fr 1fr;
+    align-items: center;
+    gap: 60px;
+    padding: 36px 0 56px;
 }
 
+.workspace-eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: #6e7f99;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    margin-bottom: 22px;
 
+    span {
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        background: var(--accent);
+    }
+}
 
 .empty-title {
-    font-size: 22px;
-    font-weight: 800;
-    color: #1e293b;
-    margin-bottom: 10px;
-    letter-spacing: -0.03em;
+    margin: 0 0 22px;
+    max-width: 460px;
+    font-size: clamp(28px, 3.2vw, 44px);
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.35;
+    letter-spacing: -0.045em;
+    text-wrap: balance;
+    span { display: block; }
+    span:last-child { color: #315c9e; }
 }
 
 .empty-subtitle {
     font-size: 14px;
-    color: #64748b;
-    max-width: 360px;
-    margin: 0 auto;
-    line-height: 1.7;
+    color: var(--text-muted);
+    max-width: 390px;
+    margin: 0;
+    line-height: 1.9;
 }
 
-.glow-effect {
-    position: absolute;
-    width: 400px;
-    height: 400px;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(59, 130, 246, 0.06) 0%, transparent 70%);
-    pointer-events: none;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+.welcome-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 28px;
+
+    .el-button {
+        margin: 0;
+        padding: 12px 18px;
+    }
+}
+
+.welcome-count {
+    margin-left: 7px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: #edf1f7;
+    color: #7a8ba3;
+    font: 11px var(--mono-font);
+}
+
+.terminal-preview {
+    border: 1px solid #273750;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #101b2e;
+    box-shadow: 0 24px 48px -16px rgba(23, 36, 59, 0.3);
+    font-family: var(--mono-font);
+    transform: rotate(-2deg);
+}
+
+.preview-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 17px 20px;
+    background: #18243a;
+    border-bottom: 1px solid #25324a;
+    color: #7d8da8;
+    font-size: 10px;
+}
+
+.preview-dots {
+    display: flex;
+    gap: 5px;
+
+    span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #ff7c72;
+        &:nth-child(2) { background: #edc16d; }
+        &:nth-child(3) { background: #75c8a2; }
+    }
+}
+
+.preview-code {
+    padding: 28px;
+    color: #d7e1f3;
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.preview-comment {
+    margin-bottom: 14px;
+    color: #7183a1;
+    font-size: 11px;
+}
+
+.preview-prompt, .preview-cursor { color: #7acfb5; }
+.preview-prompt { margin-right: 10px; }
+.preview-user { color: #a3c4ff; }
+.preview-host { color: #dce6f8; }
+.preview-divider { height: 1px; margin: 24px 0 18px; background: #22314b; }
+.preview-line {
+    color: #94a7c5;
+    font-size: 12px;
+    margin-bottom: 7px;
+    i { margin-right: 10px; color: #7899ca; }
+}
+
+.preview-cursor {
+    margin-top: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    span { width: 7px; height: 15px; background: #8cacdd; border-radius: 1px; }
+}
+
+.preview-footer {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 20px;
+    border-top: 1px solid #25324a;
+    color: #7386a6;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+}
+
+.workspace-features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    border-top: 1px solid #dfe5ef;
+    padding-top: 28px;
+}
+
+.workspace-feature {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 8px;
+    > i { padding: 10px; border: 1px solid #e0e6ef; border-radius: 10px; color: #5879aa; background: #fff; font-size: 18px; }
+    strong { color: #33435c; font-size: 13px; font-weight: 600; }
+    p { margin: 8px 0 0; color: #7c8aa0; font-size: 11px; line-height: 1.8; }
+}
+
+@media (max-width: 900px) {
+    .tabs-wrapper { padding: 16px; }
+    .empty-state { padding: 16px; }
+    .welcome-main { gap: 24px; }
+    .preview-code { padding: 22px; }
+    .workspace-features { gap: 8px; }
+    .workspace-feature { gap: 8px; > i { padding: 8px; font-size: 16px; } }
+}
+
+@media (max-width: 650px) {
+    .tabs-wrapper { padding: 12px; }
+    .empty-state { padding: 12px; }
+    .welcome-main { grid-template-columns: 1fr; padding: 12px 0 28px; gap: 32px; }
+    .empty-title { font-size: 30px; }
+    .workspace-eyebrow { margin-bottom: 16px; }
+    .terminal-preview { transform: none; }
+    .workspace-features { grid-template-columns: 1fr; padding-top: 20px; gap: 12px; }
+    .workspace-feature p { margin-top: 4px; }
 }
 
 .contextmenu {

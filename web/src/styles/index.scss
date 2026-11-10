@@ -1,6 +1,15 @@
 @use './normalize.scss' as *;
 @use './element-ui.scss' as *;
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+:root {
+  --workspace-bg: #f3f5f9;
+  --surface: #ffffff;
+  --border: #e3e8f0;
+  --accent: #2563eb;
+  --text: #17243b;
+  --text-muted: #6b7a90;
+  --panel-shadow: 0 4px 20px rgba(23, 36, 59, 0.045);
+  --mono-font: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
 
 body {
   height: 100%;
@@ -69,23 +78,15 @@ div:focus {
   padding: 24px;
 }
 
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+// Hide scrollbar chrome while preserving native scrolling and keyboard access.
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-
-::-webkit-scrollbar-track {
-  background: rgba(241, 245, 249, 0.8);
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(203, 213, 225, 0.6);
-  border-radius: 4px;
-
-  &:hover {
-    background: rgba(148, 163, 184, 0.9);
-  }
+*::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none;
 }
 
 .xterm {

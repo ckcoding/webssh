@@ -10,13 +10,19 @@
 }
 
 // 固定弹窗布局。
+.el-dialog__wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
 .el-dialog {
   transform: none;
   left: 0;
   position: relative;
-  margin: 0 auto;
+  margin: 0 !important;
   background-color: #ffffff !important;
-  border-radius: 8px;
+  border-radius: 14px;
   border: 1px solid #e2e8f0;
   box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
 }
@@ -78,9 +84,9 @@
 // Element UI 亮色主题覆盖。
 .el-input__inner {
   background-color: #f8fafc !important;
-  border: 1px solid #cbd5e1 !important;
+  border: 1px solid #dce3ed !important;
   color: #1e293b !important;
-  border-radius: 6px;
+  border-radius: 8px;
   height: 36px;
   line-height: 36px;
   font-size: 14px;
@@ -110,7 +116,7 @@
 // 文本域。
 .el-textarea__inner {
   background-color: #f8fafc !important;
-  border: 1px solid #cbd5e1 !important;
+  border: 1px solid #dce3ed !important;
   color: #1e293b !important;
   border-radius: 6px;
   font-size: 14px;
@@ -125,7 +131,7 @@
 // 默认按钮。
 .el-button {
   background-color: #ffffff !important;
-  border: 1px solid #cbd5e1 !important;
+  border: 1px solid #dce3ed !important;
   color: #475569 !important;
   border-radius: 8px;
   font-weight: 500;
@@ -148,8 +154,7 @@
     color: #3b82f6 !important;
   }
 
-  &:active {
-  }
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 
   &:focus {
     outline: none;
@@ -159,14 +164,14 @@
 
 // 主按钮。
 .el-button--primary {
-  background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
-  border-color: #3b82f6 !important;
+  background: #2563eb !important;
+  border-color: #2563eb !important;
   color: #ffffff !important;
-  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.25);
+  box-shadow: 0 3px 8px rgba(37, 99, 235, 0.15);
 
   &:hover {
-    background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
-    border-color: #2563eb !important;
+    background: #1d4ed8 !important;
+    border-color: #1d4ed8 !important;
     color: #ffffff !important;
   }
 
@@ -410,8 +415,12 @@
   background-color: rgba(255, 255, 255, 0.8) !important;
 }
 
-// 全局禁用动效，避免和页面设计冲突。
-* {
-  transition: none !important;
-  animation: none !important;
+// Preserve loading indicators and honor the operating system motion setting.
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }

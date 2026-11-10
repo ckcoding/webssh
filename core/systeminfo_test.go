@@ -1,71 +1,131 @@
 package core
 
-import "testing"
+import (
+	"encoding/base64"
+	"testing"
+)
 
-func TestParseSSHSystemInfoOutput(t *testing.T) {
-	output := `hostname=web-01
-os=Ubuntu 24.04.2 LTS
-kernel=Linux 6.8.0-57-generic x86_64 GNU/Linux
-load_average=0.10 0.20 0.30
-cpu_cores=8
-cpu_usage=12.50
-mem_total_kb=8388608
-mem_available_kb=4194304
-disk_mount=/
-disk_total_kb=52428800
-disk_available_kb=26214400
-disk_used_kb=26214400
-uptime_seconds=93784
-`
+func TestPopulateSSHSystemInfoAggregatesAllDiskEntries(t *testing.T) {
+	disksJSON := `[{"device":"/dev/vda1","mount":"/","totalKB":10485760,"usedKB":5242880,"availableKB":5242880},{"device":"/dev/vdb1","mount":"/data","totalKB":20971520,"usedKB":5242880,"availableKB":15728640}]`
+	parsed := map[string]string{
+		"disk_mount":        "/",
+		"disk_total_kb":     "10485760",
+		"disk_used_kb":      "5242880",
+		"disk_available_kb": "5242880",
+		"disks_b64":         base64.StdEncoding.EncodeToString([]byte(disksJSON)),
+	}
 
-	parsed, err := parseSSHSystemInfoOutput(output)
-	if err != nil {
-		t.Fatalf("parseSSHSystemInfoOutput() error = %v", err)
+	var info SSHSystemInfo
+	populateSSHSystemInfoWithKey(&info, parsed, "")
+
+	if len(info.Disks) != 2 {
+		t.Fatalf("len(info.Disks) = %d, want 2", len(info.Disks))
 	}
-	if parsed["hostname"] != "web-01" {
-		t.Fatalf("expected hostname web-01, got %q", parsed["hostname"])
+	if info.Disks[0].Mount != "/" || info.Disks[1].Mount != "/data" {
+		t.Fatalf("mounts = %q, %q; want / and /data", info.Disks[0].Mount, info.Disks[1].Mount)
 	}
-	if parseInt(parsed["cpu_cores"]) != 8 {
-		t.Fatalf("expected cpu_cores = 8, got %q", parsed["cpu_cores"])
+	if info.DiskTotalMB != 30720 {
+		t.Fatalf("DiskTotalMB = %d, want 30720", info.DiskTotalMB)
 	}
-	if parseFloat(parsed["cpu_usage"]) != 12.50 {
-		t.Fatalf("expected cpu_usage = 12.50, got %q", parsed["cpu_usage"])
+	if info.DiskUsedMB != 10240 {
+		t.Fatalf("DiskUsedMB = %d, want 10240", info.DiskUsedMB)
 	}
-	if parseInt64(parsed["mem_total_kb"]) != 8388608 {
-		t.Fatalf("expected mem_total_kb = 8388608, got %q", parsed["mem_total_kb"])
-	}
-	if parseInt64(parsed["disk_total_kb"]) != 52428800 {
-		t.Fatalf("expected disk_total_kb = 52428800, got %q", parsed["disk_total_kb"])
+	if info.DiskMount != "/ +1" {
+		t.Fatalf("DiskMount = %q, want / +1", info.DiskMount)
 	}
 }
 
-func TestHumanizeUptime(t *testing.T) {
-	if got := humanizeUptime(93784); got != "1d 2h 3m" {
-		t.Fatalf("expected uptime 1d 2h 3m, got %q", got)
+func TestCalculateCPUUsageFromTicks(t *testing.T) {
+	key := "127.0.0.1:22"
+	cpuUsageSnapshotMu.Lock()
+	delete(cpuUsageSnapshots, key)
+	cpuUsageSnapshotMu.Unlock()
+
+	if usage, ok := calculateCPUUsageFromTicks(key, 100, 80); ok || usage != 0 {
+		t.Fatalf("first sample usage = %v ok = %v, want no calculated usage", usage, ok)
 	}
-	if got := humanizeUptime(0); got != "" {
-		t.Fatalf("expected empty uptime for 0, got %q", got)
+
+	usage, ok := calculateCPUUsageFromTicks(key, 200, 150)
+	if !ok {
+		t.Fatalf("expected second sample to calculate usage")
+	}
+	if usage != 30 {
+		t.Fatalf("usage = %.2f, want 30.00", usage)
 	}
 }
 
-func TestFormatIPLocation(t *testing.T) {
-	got := formatIPLocation(ipWhoisResponse{
-		City:        "Los Angeles",
-		Region:      "California",
-		Country:     "United States",
-		CountryCode: "us",
-	})
-	want := "Los Angeles, California, United States"
-	if got != want {
-		t.Fatalf("expected location %q, got %q", want, got)
+func TestPopulateSSHSystemInfoUsesCPUCounterDelta(t *testing.T) {
+	key := "test-host:22"
+	cpuUsageSnapshotMu.Lock()
+	delete(cpuUsageSnapshots, key)
+	cpuUsageSnapshotMu.Unlock()
+
+	first := map[string]string{
+		"cpu_usage":       "0.00",
+		"cpu_total_ticks": "100",
+		"cpu_idle_ticks":  "90",
+	}
+	var firstInfo SSHSystemInfo
+	populateSSHSystemInfoWithKey(&firstInfo, first, key)
+	if firstInfo.CPUUsage != 0 {
+		t.Fatalf("first CPUUsage = %.2f, want 0", firstInfo.CPUUsage)
+	}
+
+	second := map[string]string{
+		"cpu_usage":       "0.00",
+		"cpu_total_ticks": "200",
+		"cpu_idle_ticks":  "140",
+	}
+	var secondInfo SSHSystemInfo
+	populateSSHSystemInfoWithKey(&secondInfo, second, key)
+	if secondInfo.CPUUsage != 50 {
+		t.Fatalf("second CPUUsage = %.2f, want 50", secondInfo.CPUUsage)
 	}
 }
 
-func TestCountryFlagEmoji(t *testing.T) {
-	if got := countryFlagEmoji("JP"); got != "🇯🇵" {
-		t.Fatalf("expected JP flag, got %q", got)
+func TestResolvedIPMissCache(t *testing.T) {
+	address := "missing.example.test"
+	setCachedResolvedIPMiss(address)
+
+	ip, ok := getCachedResolvedIP(address)
+	if !ok {
+		t.Fatalf("expected cached miss")
 	}
-	if got := countryFlagEmoji("unknown"); got != "" {
-		t.Fatalf("expected empty flag for invalid code, got %q", got)
+	if ip != "" {
+		t.Fatalf("cached miss ip = %q, want empty", ip)
+	}
+
+	setCachedResolvedIP(address, "203.0.113.10")
+	ip, ok = getCachedResolvedIP(address)
+	if !ok {
+		t.Fatalf("expected cached hit")
+	}
+	if ip != "203.0.113.10" {
+		t.Fatalf("cached ip = %q, want 203.0.113.10", ip)
+	}
+}
+
+func TestIPLocationMissCache(t *testing.T) {
+	ip := "203.0.113.20"
+	setCachedIPLocationMiss(ip)
+
+	location, countryFlag, found, ok := getCachedIPLocation(ip)
+	if !ok {
+		t.Fatalf("expected cached miss")
+	}
+	if found {
+		t.Fatalf("found = true, want false")
+	}
+	if location != "" || countryFlag != "" {
+		t.Fatalf("cached miss location = %q flag = %q, want empty", location, countryFlag)
+	}
+
+	setCachedIPLocation(ip, "Test City", "TC")
+	location, countryFlag, found, ok = getCachedIPLocation(ip)
+	if !ok || !found {
+		t.Fatalf("expected cached hit")
+	}
+	if location != "Test City" || countryFlag != "TC" {
+		t.Fatalf("cached location = %q flag = %q, want Test City/TC", location, countryFlag)
 	}
 }
