@@ -151,4 +151,5 @@ cd web && npm test
 
 ## 致谢
 
-本项目基于 [Jrohy/webssh](https://github.com/Jrohy/webssh) 二次开发，遵循 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 开源协议。
+- 本项目基于 [Jrohy/webssh](https://github.com/Jrohy/webssh) 二次开发，遵循 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.en.html) 开源协议。
+- 感谢 [LINUX DO](https://linux.do/) 社区的支持与交流。
