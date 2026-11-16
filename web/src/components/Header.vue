@@ -56,6 +56,8 @@
                     </el-dropdown-menu>
                 </el-dropdown>
 
+                <server-overview @connect="connectSavedById"></server-overview>
+
                 <file-list></file-list>
 
                 <el-button size="small" icon="el-icon-question" circle class="lang-btn" @click="showShortcuts"
@@ -162,6 +164,7 @@
 <script>
 import { getLanguage } from '@/lang/index'
 import FileList from '@/components/FileList'
+import ServerOverview from '@/components/ServerOverview'
 import KeyboardShortcuts from '@/components/KeyboardShortcuts'
 import { buildSSHSystemStreamURL, checkSSHConnection, createSSHSession, deleteSavedSSH, getSSHSystemInfo, listSavedSSH, refreshSavedSSHInfo, saveSavedSSH } from '@/api/ssh'
 import { mapState } from 'vuex'
@@ -206,6 +209,7 @@ async function runWithConcurrency(items, limit, handler) {
 export default {
     components: {
         'file-list': FileList,
+        'server-overview': ServerOverview,
         'keyboard-shortcuts': KeyboardShortcuts
     },
     data() {
@@ -882,6 +886,14 @@ export default {
         },
         handleSavedCommand(command) {
             this.applySSHCommand(command)
+        },
+        connectSavedById(id) {
+            const item = this.savedSSHList.find(entry => entry.id === id)
+            if (!item) {
+                this.$message.warning(this.$t('noMatchingHosts'))
+                return
+            }
+            this.applySSHCommand(item)
         },
         openSavedSSHMenu() {
             this.$refs.savedSSHDropdown.show()

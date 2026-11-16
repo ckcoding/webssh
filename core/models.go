@@ -273,6 +273,13 @@ type SSHSystemInfo struct {
 	Disks             []SSHDiskInfo `json:"disks"`
 	GPUs              []SSHGPUInfo  `json:"gpus"`
 	Uptime            string        `json:"uptime"`
+	UptimeSeconds     int64         `json:"uptimeSeconds"`
+	SwapTotalMB       int64         `json:"swapTotalMB"`
+	SwapUsedMB        int64         `json:"swapUsedMB"`
+	NetRxBytes        int64         `json:"netRxBytes"`
+	NetTxBytes        int64         `json:"netTxBytes"`
+	ProcessCount      int           `json:"processCount"`
+	TCPConnCount      int           `json:"tcpConnCount"`
 	UpdatedAt         string        `json:"updatedAt"`
 }
 

@@ -336,6 +336,12 @@ DISKS_B64=""
 UPTIME_SECONDS=0
 BOOT_TIME=0
 CURRENT_EPOCH=0
+NET_RX_BYTES=0
+NET_TX_BYTES=0
+PROCESS_COUNT=0
+TCP_CONN_COUNT=0
+SWAP_TOTAL_KB=0
+SWAP_FREE_KB=0
 
 case "$UNAME" in
   Linux)
@@ -353,6 +359,24 @@ case "$UNAME" in
     fi
     UPTIME_SECONDS=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
     LOAD_AVERAGE=$(cut -d" " -f1-3 /proc/loadavg 2>/dev/null || true)
+    SWAP_TOTAL_KB=$(awk '/^SwapTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)
+    SWAP_FREE_KB=$(awk '/^SwapFree:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ -r /proc/net/dev ]; then
+      read NET_RX_BYTES NET_TX_BYTES <<NETEOF
+$(awk 'NR > 2 {
+        line = $0
+        sub(/^[ 	]+/, "", line)
+        split(line, parts, ":")
+        name = parts[1]
+        if (name ~ /^(lo|docker|veth|br-|virbr|cni|flannel|kube|cali|vxlan|tun|tap)/) next
+        split(parts[2], fields, " ")
+        rx += fields[1]
+        tx += fields[9]
+      } END { printf "%.0f %.0f", rx, tx }' /proc/net/dev 2>/dev/null)
+NETEOF
+    fi
+    PROCESS_COUNT=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l | tr -d ' ')
+    TCP_CONN_COUNT=$(cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk '$1 ~ /^[0-9]+:$/ {n++} END {print n+0}')
 
     if [ -r /proc/stat ]; then
       read _ U N S I IO IRQ SIRQ ST _ < /proc/stat
@@ -444,6 +468,12 @@ printf "disks_b64=%s\n" "$DISKS_B64"
 printf "uptime_seconds=%s\n" "$UPTIME_SECONDS"
 printf "boot_time=%s\n" "$BOOT_TIME"
 printf "current_epoch=%s\n" "$CURRENT_EPOCH"
+printf "net_rx_bytes=%s\n" "$(ensure_uint "$NET_RX_BYTES")"
+printf "net_tx_bytes=%s\n" "$(ensure_uint "$NET_TX_BYTES")"
+printf "process_count=%s\n" "$(ensure_uint "$PROCESS_COUNT")"
+printf "tcp_conn_count=%s\n" "$(ensure_uint "$TCP_CONN_COUNT")"
+printf "swap_total_kb=%s\n" "$(ensure_uint "$SWAP_TOTAL_KB")"
+printf "swap_free_kb=%s\n" "$(ensure_uint "$SWAP_FREE_KB")"
 EOF`
 
 type ipWhoisResponse struct {
@@ -684,11 +714,23 @@ func populateSSHSystemInfoWithKey(info *SSHSystemInfo, parsed map[string]string,
 			info.DiskMount = fmt.Sprintf("%s +%d", info.Disks[0].Mount, len(info.Disks)-1)
 		}
 	}
-	info.Uptime = humanizeUptime(resolveUptimeSeconds(
+	info.UptimeSeconds = resolveUptimeSeconds(
 		parseInt64(parsed["uptime_seconds"]),
 		parseInt64(parsed["boot_time"]),
 		parseInt64(parsed["current_epoch"]),
-	))
+	)
+	info.Uptime = humanizeUptime(info.UptimeSeconds)
+
+	swapTotalKB := parseInt64(parsed["swap_total_kb"])
+	swapFreeKB := parseInt64(parsed["swap_free_kb"])
+	if swapTotalKB > 0 && swapFreeKB >= 0 && swapFreeKB <= swapTotalKB {
+		info.SwapTotalMB = swapTotalKB / 1024
+		info.SwapUsedMB = (swapTotalKB - swapFreeKB) / 1024
+	}
+	info.NetRxBytes = parseInt64(parsed["net_rx_bytes"])
+	info.NetTxBytes = parseInt64(parsed["net_tx_bytes"])
+	info.ProcessCount = parseInt(parsed["process_count"])
+	info.TCPConnCount = parseInt(parsed["tcp_conn_count"])
 }
 
 func cpuUsageCacheKey(sshClient *SSHClient) string {

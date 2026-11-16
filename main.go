@@ -379,6 +379,9 @@ func newServer() *gin.Engine {
 		ssh.GET("/system", func(c *gin.Context) {
 			c.JSON(200, controller.GetSSHSystemInfo(c))
 		})
+		ssh.GET("/overview", func(c *gin.Context) {
+			c.JSON(200, controller.GetServerOverview(c))
+		})
 		ssh.GET("/system/stream", func(c *gin.Context) {
 			controller.StreamSSHSystemInfo(c)
 		})

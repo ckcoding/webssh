@@ -57,3 +57,7 @@ export function deleteSavedSSH(id) {
 export function refreshSavedSSHInfo(id) {
     return request.post(buildAppPath(`/ssh/saved/${encodeURIComponent(id)}/refresh`), {}, { timeout: 35000 })
 }
+
+export function getServerOverview() {
+    return request.get(buildAppPath('/ssh/overview'), { timeout: 30000 })
+}
