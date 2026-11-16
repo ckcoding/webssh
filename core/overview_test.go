@@ -114,3 +114,41 @@ func TestCollectOverviewTimesOutSlowHost(t *testing.T) {
 		t.Fatalf("slow host status = %q, want offline", overview.Servers[0].Status)
 	}
 }
+
+func TestPopulateSystemInfoParsesTrafficAndProcessFields(t *testing.T) {
+	output := "hostname=WIN-DEMO\nos=Microsoft Windows Server 2022\nmem_total_kb=8388608\nmem_available_kb=4194304\n" +
+		"net_rx_bytes=123456789\nnet_tx_bytes=987654\nprocess_count=142\ntcp_conn_count=57\n" +
+		"swap_total_kb=2097152\nswap_free_kb=1048576\nuptime_seconds=3600\n"
+	parsed, err := parseSSHSystemInfoOutput(output)
+	if err != nil {
+		t.Fatalf("parseSSHSystemInfoOutput() error = %v", err)
+	}
+	var info SSHSystemInfo
+	populateSSHSystemInfoWithKey(&info, parsed, "")
+	if info.NetRxBytes != 123456789 || info.NetTxBytes != 987654 {
+		t.Fatalf("traffic = %d/%d", info.NetRxBytes, info.NetTxBytes)
+	}
+	if info.ProcessCount != 142 || info.TCPConnCount != 57 {
+		t.Fatalf("process/tcp = %d/%d", info.ProcessCount, info.TCPConnCount)
+	}
+	if info.SwapTotalMB != 2048 || info.SwapUsedMB != 1024 {
+		t.Fatalf("swap = %d/%d MB", info.SwapUsedMB, info.SwapTotalMB)
+	}
+	if info.UptimeSeconds != 3600 {
+		t.Fatalf("uptimeSeconds = %d", info.UptimeSeconds)
+	}
+}
+
+func TestIsWindowsVerOutput(t *testing.T) {
+	cases := map[string]bool{
+		"\r\nMicrosoft Windows [Version 10.0.22631.4602]\r\n": true,
+		"Microsoft Windows [版本 10.0.19045.5247]":              true,
+		"Linux": false,
+		"":      false,
+	}
+	for input, want := range cases {
+		if got := isWindowsVerOutput(input); got != want {
+			t.Fatalf("isWindowsVerOutput(%q) = %v, want %v", input, got, want)
+		}
+	}
+}

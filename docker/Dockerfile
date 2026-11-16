@@ -65,7 +65,7 @@ ENV TZ=Asia/Shanghai \
 WORKDIR /home/webssh
 USER webssh
 EXPOSE 5032
-VOLUME ["/home/webssh/.config/webssh"]
+# 数据目录 /home/webssh/.config/webssh 请通过 -v 或 compose 挂载持久化
 
 # Follows the runtime port / basePath env vars; /api/status needs no login.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

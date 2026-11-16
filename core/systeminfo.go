@@ -45,7 +45,7 @@ $hVc = $psVc.BeginInvoke()
 
 # 主线程：OS + 磁盘
 $hostname = $env:COMPUTERNAME
-$os = (Get-CimInstance Win32_OperatingSystem -Property Caption,Version,TotalVisibleMemorySize,FreePhysicalMemory,LastBootUpTime | Select-Object -First 1)
+$os = (Get-CimInstance Win32_OperatingSystem -Property Caption,Version,TotalVisibleMemorySize,FreePhysicalMemory,LastBootUpTime,NumberOfProcesses | Select-Object -First 1)
 $osCaption = if($os.Caption){ $os.Caption.Trim() } else { '' }
 $osVer = if($os.Version){ $os.Version } else { '' }
 $kernel = if($osVer){ 'Windows ' + $osVer } else { '' }
@@ -172,6 +172,40 @@ $gpusB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($gpus
 $pool.Close()
 $pool.Dispose()
 
+# 网络：累计收发字节（开机/网卡启用以来），速率由服务端按两次采样差值计算。
+# 优先使用性能计数器原始值（无需 NetAdapter 模块），失败时回退 Get-NetAdapterStatistics。
+$netRx = [uint64]0
+$netTx = [uint64]0
+$nics = Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface -Property Name,BytesReceivedPersec,BytesSentPersec
+foreach($n in $nics){
+  $nicName = [string]$n.Name
+  if($nicName -like '*isatap*'){ continue }
+  if($nicName -like '*teredo*'){ continue }
+  if($nicName -like '*loopback*'){ continue }
+  $netRx += [uint64]$n.BytesReceivedPersec
+  $netTx += [uint64]$n.BytesSentPersec
+}
+if(($netRx -eq 0) -and ($netTx -eq 0)){
+  $stats = Get-NetAdapterStatistics
+  foreach($st in $stats){ $netRx += [uint64]$st.ReceivedBytes; $netTx += [uint64]$st.SentBytes }
+}
+
+# 进程数与 TCP 连接数（含监听端口，与 Linux 读取 /proc/net/tcp 的口径一致）
+$procCount = 0
+if($os -and $os.NumberOfProcesses){ $procCount = [uint64]$os.NumberOfProcesses }
+if($procCount -le 0){ $procCount = @(Get-Process).Count }
+$tcpCount = 0
+$ipProps = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+if($ipProps){ $tcpCount = @($ipProps.GetActiveTcpConnections()).Count + @($ipProps.GetActiveTcpListeners()).Count }
+
+# 虚拟内存（页面文件），单位 MB
+$swapTotalKB = [uint64]0
+$swapUsedKB = [uint64]0
+$pageFiles = Get-CimInstance Win32_PageFileUsage -Property AllocatedBaseSize,CurrentUsage
+foreach($pf in $pageFiles){ $swapTotalKB += [uint64]$pf.AllocatedBaseSize * 1024; $swapUsedKB += [uint64]$pf.CurrentUsage * 1024 }
+$swapFreeKB = [uint64]0
+if($swapTotalKB -gt $swapUsedKB){ $swapFreeKB = $swapTotalKB - $swapUsedKB }
+
 # 运行时间
 $uptimeSec = 0
 $bootTime = 0
@@ -201,6 +235,12 @@ Write-Output ("gpus_b64=" + $gpusB64)
 Write-Output ("uptime_seconds=" + $uptimeSec)
 Write-Output ("boot_time=" + $bootTime)
 Write-Output ("current_epoch=" + $currentEpoch)
+Write-Output ("net_rx_bytes=" + $netRx)
+Write-Output ("net_tx_bytes=" + $netTx)
+Write-Output ("process_count=" + $procCount)
+Write-Output ("tcp_conn_count=" + $tcpCount)
+Write-Output ("swap_total_kb=" + $swapTotalKB)
+Write-Output ("swap_free_kb=" + $swapFreeKB)
 `
 
 const systemInfoCommand = `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -588,7 +628,36 @@ func detectRemoteOS(sshClient *SSHClient) string {
 			return "windows"
 		}
 	}
+	// 默认 shell 为 PowerShell 的 Windows OpenSSH 不支持上面的 "||" 与 /dev/null（5.1 直接报解析错误），
+	// 再用 cmd /c ver 探测一次：cmd 与 PowerShell 下均可执行，POSIX 下会失败。
+	if probeWindowsVer(sshClient) {
+		if cacheKey != "" {
+			remoteOSCacheMu.Lock()
+			remoteOSCache[cacheKey] = remoteOSCacheEntry{os: "windows", expires: time.Now().Add(remoteOSCacheTTL)}
+			remoteOSCacheMu.Unlock()
+		}
+		return "windows"
+	}
 	return "unknown"
+}
+
+func probeWindowsVer(sshClient *SSHClient) bool {
+	session, err := sshClient.Client.NewSession()
+	if err != nil {
+		return false
+	}
+	defer session.Close()
+	var out bytes.Buffer
+	session.Stdout = &out
+	if err := session.Run("cmd /c ver"); err != nil {
+		return false
+	}
+	return isWindowsVerOutput(out.String())
+}
+
+// isWindowsVerOutput 判断 ver 输出是否来自 Windows（兼容中文系统 "Microsoft Windows [版本 ...]"）。
+func isWindowsVerOutput(output string) bool {
+	return strings.Contains(strings.ToLower(output), "microsoft windows")
 }
 
 // windowsSystemInfoShell 是启动 Windows 信息采集的命令行。
