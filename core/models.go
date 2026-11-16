@@ -280,6 +280,7 @@ type SSHSystemInfo struct {
 	NetTxBytes        int64         `json:"netTxBytes"`
 	ProcessCount      int           `json:"processCount"`
 	TCPConnCount      int           `json:"tcpConnCount"`
+	CollectWarning    string        `json:"collectWarning,omitempty"`
 	UpdatedAt         string        `json:"updatedAt"`
 }
 

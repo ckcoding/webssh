@@ -251,5 +251,6 @@ export default {
     ovProcesses: 'Processes',
     ovTCP: 'TCP connections',
     ovCores: 'cores',
-    ovLastSeen: 'Last seen'
+    ovLastSeen: 'Last seen',
+    ovPartialData: 'Some metrics unavailable'
 }

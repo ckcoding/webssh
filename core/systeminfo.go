@@ -23,13 +23,30 @@ $ProgressPreference='SilentlyContinue'
 
 function Ensure-UInt($v){ if($v -match '^\d+$'){ [uint64]$v } else { 0 } }
 
+# Get-CimInstance 失败时回退 Get-WmiObject（PowerShell 5.1 的 DCOM 通道），并记录错误供前端提示。
+$script:collectErrors = @()
+$script:wmiBroken = $false
+if(-not (Test-Path variable:skipWmi)){ $skipWmi = $false }
+function Get-WmiSafe($Class, $Property, $Filter){
+  $r = $null
+  if($skipWmi -or $script:wmiBroken){ return $null }
+  $Error.Clear()
+  if($Filter){ $r = Get-CimInstance $Class -Filter $Filter -Property $Property } else { $r = Get-CimInstance $Class -Property $Property }
+  if($r){ return $r }
+  if($Error.Count -gt 0){ $script:collectErrors += ('CIM ' + $Class + ': ' + $Error[0].Exception.Message) }
+  $Error.Clear()
+  if($Filter){ $r = Get-WmiObject $Class -Filter $Filter -Property $Property } else { $r = Get-WmiObject $Class -Property $Property }
+  if((-not $r) -and ($Error.Count -gt 0)){ $script:collectErrors += ('WMI ' + $Class + ': ' + $Error[0].Exception.Message); $script:wmiBroken = $true }
+  return $r
+}
+
 # 并行采集：Win32_Processor / nvidia-smi / Win32_VideoController 三个慢查询同时跑，
 # 主线程同时跑 Win32_OperatingSystem / Win32_LogicalDisk，将总耗时从串行 ~5s 压到 ~1.5s。
 $pool = [RunspaceFactory]::CreateRunspacePool(1, 4)
 $pool.Open()
 
 $psProc = [PowerShell]::Create(); $psProc.RunspacePool = $pool
-[void]$psProc.AddScript({ Get-CimInstance Win32_Processor -Property NumberOfLogicalProcessors,LoadPercentage })
+[void]$psProc.AddScript({ param($skip) if(-not $skip){ Get-CimInstance Win32_Processor -Property NumberOfLogicalProcessors,LoadPercentage } }).AddArgument($skipWmi)
 $hProc = $psProc.BeginInvoke()
 
 $psNv = [PowerShell]::Create(); $psNv.RunspacePool = $pool
@@ -40,12 +57,12 @@ $psNv = [PowerShell]::Create(); $psNv.RunspacePool = $pool
 $hNv = $psNv.BeginInvoke()
 
 $psVc = [PowerShell]::Create(); $psVc.RunspacePool = $pool
-[void]$psVc.AddScript({ Get-CimInstance Win32_VideoController -Property Name,DriverVersion,AdapterRAM,CurrentHorizontalResolution,CurrentVerticalResolution })
+[void]$psVc.AddScript({ param($skip) if(-not $skip){ Get-CimInstance Win32_VideoController -Property Name,DriverVersion,AdapterRAM,CurrentHorizontalResolution,CurrentVerticalResolution } }).AddArgument($skipWmi)
 $hVc = $psVc.BeginInvoke()
 
 # 主线程：OS + 磁盘
 $hostname = $env:COMPUTERNAME
-$os = (Get-CimInstance Win32_OperatingSystem -Property Caption,Version,TotalVisibleMemorySize,FreePhysicalMemory,LastBootUpTime,NumberOfProcesses | Select-Object -First 1)
+$os = (Get-WmiSafe 'Win32_OperatingSystem' @('Caption','Version','TotalVisibleMemorySize','FreePhysicalMemory','LastBootUpTime','NumberOfProcesses') $null | Select-Object -First 1)
 $osCaption = if($os.Caption){ $os.Caption.Trim() } else { '' }
 $osVer = if($os.Version){ $os.Version } else { '' }
 $kernel = if($osVer){ 'Windows ' + $osVer } else { '' }
@@ -53,8 +70,25 @@ $kernel = if($osVer){ 'Windows ' + $osVer } else { '' }
 $memTotalKB = [uint64]0
 $memFreeKB = [uint64]0
 if($os){ $memTotalKB = [uint64]$os.TotalVisibleMemorySize; $memFreeKB = [uint64]$os.FreePhysicalMemory }
+# WMI 不可用（如账号在非交互 SSH 会话中被拒绝访问）时，改用注册表与 Win32 API 取值。
+if(-not $osCaption){
+  $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+  if($cv){ $osCaption = [string]$cv.ProductName; $kernel = 'Windows ' + [string]$cv.CurrentBuild }
+}
+if($memTotalKB -eq 0){
+  Add-Type -AssemblyName Microsoft.VisualBasic
+  $ci = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
+  if($ci){ $memTotalKB = [uint64]($ci.TotalPhysicalMemory / 1KB); $memFreeKB = [uint64]($ci.AvailablePhysicalMemory / 1KB) }
+}
 
-$volList = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -Property DeviceID,Size,FreeSpace
+$volList = Get-WmiSafe 'Win32_LogicalDisk' @('DeviceID','Size','FreeSpace') 'DriveType=3'
+if(-not $volList){
+  $volList = @()
+  foreach($dv in [System.IO.DriveInfo]::GetDrives()){
+    if(([string]$dv.DriveType -ne 'Fixed') -or (-not $dv.IsReady)){ continue }
+    $volList += [PSCustomObject]@{ DeviceID = $dv.Name.TrimEnd('\'); Size = $dv.TotalSize; FreeSpace = $dv.AvailableFreeSpace }
+  }
+}
 $disksJson = '[]'
 $diskArr = @()
 foreach($v in $volList){
@@ -89,12 +123,20 @@ if($rootDisk){
 
 # 收集并行结果
 $processors = $psProc.EndInvoke($hProc)
+if(-not $processors){ $processors = Get-WmiSafe 'Win32_Processor' @('NumberOfLogicalProcessors','LoadPercentage') $null }
 $cpuCores = 0
 foreach($p in $processors){ $cpuCores += [int]$p.NumberOfLogicalProcessors }
 if($cpuCores -le 0){ $cpuCores = $env:NUMBER_OF_PROCESSORS }
 $cpuUsage = 0.0
 $loadAvg = ($processors | Measure-Object -Property LoadPercentage -Average).Average
 if($loadAvg -ne $null){ $cpuUsage = [double]$loadAvg }
+$cpuTotalTicks = [uint64]0
+$cpuIdleTicks = [uint64]0
+if(-not $processors){
+  Add-Type -Namespace WebSSH -Name SysTimes -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);'
+  $ti = [long]0; $tk = [long]0; $tu = [long]0
+  if([WebSSH.SysTimes]::GetSystemTimes([ref]$ti, [ref]$tk, [ref]$tu)){ $cpuTotalTicks = [uint64]($tk + $tu); $cpuIdleTicks = [uint64]$ti }
+}
 
 # GPU 列表：优先用 nvidia-smi 采集 NVIDIA 卡（含利用率/显存/温度），
 # 再用 Win32_VideoController 补充非 NVIDIA 卡（无利用率）。
@@ -176,7 +218,7 @@ $pool.Dispose()
 # 优先使用性能计数器原始值（无需 NetAdapter 模块），失败时回退 Get-NetAdapterStatistics。
 $netRx = [uint64]0
 $netTx = [uint64]0
-$nics = Get-CimInstance Win32_PerfRawData_Tcpip_NetworkInterface -Property Name,BytesReceivedPersec,BytesSentPersec
+$nics = Get-WmiSafe 'Win32_PerfRawData_Tcpip_NetworkInterface' @('Name','BytesReceivedPersec','BytesSentPersec') $null
 foreach($n in $nics){
   $nicName = [string]$n.Name
   if($nicName -like '*isatap*'){ continue }
@@ -186,8 +228,14 @@ foreach($n in $nics){
   $netTx += [uint64]$n.BytesSentPersec
 }
 if(($netRx -eq 0) -and ($netTx -eq 0)){
-  $stats = Get-NetAdapterStatistics
-  foreach($st in $stats){ $netRx += [uint64]$st.ReceivedBytes; $netTx += [uint64]$st.SentBytes }
+  foreach($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){
+    $nt = [string]$ni.NetworkInterfaceType
+    if(($nt -eq 'Loopback') -or ($nt -eq 'Tunnel')){ continue }
+    if($ni.Name -like 'vEthernet*'){ continue }
+    $ipst = $ni.GetIPStatistics()
+    $netRx += [uint64]$ipst.BytesReceived
+    $netTx += [uint64]$ipst.BytesSent
+  }
 }
 
 # 进程数与 TCP 连接数（含监听端口，与 Linux 读取 /proc/net/tcp 的口径一致）
@@ -201,7 +249,7 @@ if($ipProps){ $tcpCount = @($ipProps.GetActiveTcpConnections()).Count + @($ipPro
 # 虚拟内存（页面文件），单位 MB
 $swapTotalKB = [uint64]0
 $swapUsedKB = [uint64]0
-$pageFiles = Get-CimInstance Win32_PageFileUsage -Property AllocatedBaseSize,CurrentUsage
+$pageFiles = Get-WmiSafe 'Win32_PageFileUsage' @('AllocatedBaseSize','CurrentUsage') $null
 foreach($pf in $pageFiles){ $swapTotalKB += [uint64]$pf.AllocatedBaseSize * 1024; $swapUsedKB += [uint64]$pf.CurrentUsage * 1024 }
 $swapFreeKB = [uint64]0
 if($swapTotalKB -gt $swapUsedKB){ $swapFreeKB = $swapTotalKB - $swapUsedKB }
@@ -215,6 +263,7 @@ if($lastBoot){
   $uptimeSec = [uint64]((Get-Date) - $lastBoot).TotalSeconds
 }
 $currentEpoch = [uint64](Get-Date -UFormat %s)
+if($uptimeSec -eq 0){ $uptimeSec = [uint64]([System.Diagnostics.Stopwatch]::GetTimestamp() / [System.Diagnostics.Stopwatch]::Frequency) }
 
 Write-Output ("hostname=" + $hostname)
 Write-Output ("os=" + $osCaption)
@@ -222,8 +271,8 @@ Write-Output ("kernel=" + $kernel)
 Write-Output ("load_average=")
 Write-Output ("cpu_cores=" + $cpuCores)
 Write-Output ("cpu_usage=" + ('{0:F2}' -f $cpuUsage))
-Write-Output ("cpu_total_ticks=0")
-Write-Output ("cpu_idle_ticks=0")
+Write-Output ("cpu_total_ticks=" + $cpuTotalTicks)
+Write-Output ("cpu_idle_ticks=" + $cpuIdleTicks)
 Write-Output ("mem_total_kb=" + $memTotalKB)
 Write-Output ("mem_available_kb=" + $memFreeKB)
 Write-Output ("disk_mount=" + $diskMount)
@@ -241,6 +290,9 @@ Write-Output ("process_count=" + $procCount)
 Write-Output ("tcp_conn_count=" + $tcpCount)
 Write-Output ("swap_total_kb=" + $swapTotalKB)
 Write-Output ("swap_free_kb=" + $swapFreeKB)
+$collectWarning = (@($script:collectErrors) | Select-Object -First 2) -join ' ; '
+Write-Output ("collect_warning=" + ($collectWarning -replace '[\r\n]+', ' '))
+if($script:wmiBroken){ Write-Output 'wmi_denied=1' }
 `
 
 const systemInfoCommand = `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -665,12 +717,69 @@ func isWindowsVerOutput(output string) bool {
 // 避免命令行长度限制（cmd.exe 约 8191 字符）导致 -EncodedCommand 被截断。
 const windowsSystemInfoShell = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"
 
-// windowsSystemInfoScript 返回通过 stdin 传入的 PowerShell 脚本原文。
+// windowsSystemInfoScript 返回通过 stdin 传入的 PowerShell 脚本。
+// 发送前去掉整行注释，保证脚本为纯 ASCII：当远端 OpenSSH 默认 shell 为 PowerShell 时，
+// stdin 会先经过外层 PowerShell 按系统代码页（如 GBK）转码，中文注释可能吞掉换行，
+// 导致紧随其后的代码行被并入注释而不执行。
+var windowsSystemInfoScriptASCII = stripPowerShellCommentLines(windowsSystemInfoCommandTemplate)
+
 func windowsSystemInfoScript() string {
-	return windowsSystemInfoCommandTemplate
+	return windowsSystemInfoScriptASCII
+}
+
+func stripPowerShellCommentLines(script string) string {
+	lines := strings.Split(script, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 // CollectSSHSystemInfo 采集 SSH 远端系统信息
+// 部分 Windows 账号在非交互 SSH 会话中访问 WMI 会被拒绝，且每次拒绝要等十几秒。
+// 记住这类主机，在 TTL 内直接跳过 WMI、只用注册表 / Win32 API 采集，到期后再重新探测。
+const windowsWMIDeniedTTL = 30 * time.Minute
+
+type windowsWMIDeniedEntry struct {
+	expires time.Time
+	warning string
+}
+
+var windowsWMIDenied = struct {
+	sync.Mutex
+	entries map[string]windowsWMIDeniedEntry
+}{entries: make(map[string]windowsWMIDeniedEntry)}
+
+func windowsWMIDeniedLookup(key string) (bool, string) {
+	if key == "" {
+		return false, ""
+	}
+	windowsWMIDenied.Lock()
+	defer windowsWMIDenied.Unlock()
+	entry, ok := windowsWMIDenied.entries[key]
+	if !ok {
+		return false, ""
+	}
+	if time.Now().After(entry.expires) {
+		delete(windowsWMIDenied.entries, key)
+		return false, ""
+	}
+	return true, entry.warning
+}
+
+func windowsWMIDeniedStore(key, warning string) {
+	if key == "" {
+		return
+	}
+	windowsWMIDenied.Lock()
+	defer windowsWMIDenied.Unlock()
+	windowsWMIDenied.entries[key] = windowsWMIDeniedEntry{expires: time.Now().Add(windowsWMIDeniedTTL), warning: warning}
+}
+
 func CollectSSHSystemInfo(sshClient *SSHClient) (SSHSystemInfo, error) {
 	info := SSHSystemInfo{
 		ConnectAddress: normalizeSSHAddress(sshClient.IPAddress),
@@ -681,8 +790,14 @@ func CollectSSHSystemInfo(sshClient *SSHClient) (SSHSystemInfo, error) {
 	remoteOS := detectRemoteOS(sshClient)
 	var output string
 	var err error
+	wmiKey := cpuUsageCacheKey(sshClient)
+	skipWMI, cachedWarning := windowsWMIDeniedLookup(wmiKey)
 	if remoteOS == "windows" {
-		output, err = sshClient.RunScript(windowsSystemInfoShell, windowsSystemInfoScript())
+		script := windowsSystemInfoScript()
+		if skipWMI {
+			script = "$skipWmi = $true\n" + script
+		}
+		output, err = sshClient.RunScript(windowsSystemInfoShell, script)
 	} else {
 		output, err = sshClient.RunCommand(command)
 	}
@@ -695,7 +810,20 @@ func CollectSSHSystemInfo(sshClient *SSHClient) (SSHSystemInfo, error) {
 		return info, err
 	}
 
-	populateSSHSystemInfoWithKey(&info, parsed, cpuUsageCacheKey(sshClient))
+	populateSSHSystemInfoWithKey(&info, parsed, wmiKey)
+	if remoteOS == "windows" {
+		if parsed["wmi_denied"] == "1" && !skipWMI {
+			windowsWMIDeniedStore(wmiKey, info.CollectWarning)
+		}
+		if skipWMI && info.CollectWarning == "" {
+			info.CollectWarning = cachedWarning
+		}
+		// WMI 被拒绝但注册表 / Win32 API 已补齐核心指标时不再提示，避免误报；
+		// 只有备用方式也拿不到系统与内存信息时才在前端展示原因。
+		if info.OS != "" && info.MemoryTotalMB > 0 {
+			info.CollectWarning = ""
+		}
+	}
 
 	resolvedIP := resolveSSHIPAddress(info.ConnectAddress)
 	info.IP = resolvedIP
@@ -800,6 +928,7 @@ func populateSSHSystemInfoWithKey(info *SSHSystemInfo, parsed map[string]string,
 	info.NetTxBytes = parseInt64(parsed["net_tx_bytes"])
 	info.ProcessCount = parseInt(parsed["process_count"])
 	info.TCPConnCount = parseInt(parsed["tcp_conn_count"])
+	info.CollectWarning = strings.TrimSpace(parsed["collect_warning"])
 }
 
 func cpuUsageCacheKey(sshClient *SSHClient) string {

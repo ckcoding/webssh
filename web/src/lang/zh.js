@@ -252,5 +252,6 @@ export default {
     ovProcesses: '进程数',
     ovTCP: 'TCP 连接数',
     ovCores: '核',
-    ovLastSeen: '最后在线'
+    ovLastSeen: '最后在线',
+    ovPartialData: '部分指标未采集到'
 }

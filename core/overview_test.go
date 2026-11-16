@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,5 +151,39 @@ func TestIsWindowsVerOutput(t *testing.T) {
 		if got := isWindowsVerOutput(input); got != want {
 			t.Fatalf("isWindowsVerOutput(%q) = %v, want %v", input, got, want)
 		}
+	}
+}
+
+func TestWindowsSystemInfoScriptIsASCII(t *testing.T) {
+	script := windowsSystemInfoScript()
+	for i, r := range script {
+		if r > 127 {
+			t.Fatalf("windows script contains non-ASCII rune %q at byte %d", r, i)
+		}
+	}
+	for _, key := range []string{"os=", "mem_total_kb=", "net_rx_bytes=", "process_count=", "tcp_conn_count="} {
+		if !strings.Contains(script, key) {
+			t.Fatalf("windows script lost output key %q after stripping comments", key)
+		}
+	}
+}
+
+func TestWindowsWMIDeniedCache(t *testing.T) {
+	key := "wmi-test-host:22"
+	if skip, _ := windowsWMIDeniedLookup(key); skip {
+		t.Fatal("unexpected cached entry before store")
+	}
+	windowsWMIDeniedStore(key, "CIM Win32_OperatingSystem: access denied")
+	skip, warning := windowsWMIDeniedLookup(key)
+	if !skip || warning == "" {
+		t.Fatalf("expected cached denial, got skip=%v warning=%q", skip, warning)
+	}
+	windowsWMIDenied.Lock()
+	entry := windowsWMIDenied.entries[key]
+	entry.expires = time.Now().Add(-time.Second)
+	windowsWMIDenied.entries[key] = entry
+	windowsWMIDenied.Unlock()
+	if skip, _ := windowsWMIDeniedLookup(key); skip {
+		t.Fatal("expired entry should trigger a re-probe")
 	}
 }

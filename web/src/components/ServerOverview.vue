@@ -106,6 +106,9 @@
                                 <span :title="$t('ovTCP')">TCP {{ server.info.tcpConnCount || '-' }}</span>
                                 <span v-if="server.expiresAt" :title="$t('ExpiresAt')"><i class="el-icon-date"></i>{{ server.expiresAt.slice(0, 10) }}</span>
                             </div>
+                            <div v-if="server.info.collectWarning" class="ov-warning" :title="server.info.collectWarning">
+                                <i class="el-icon-warning-outline"></i>{{ $t('ovPartialData') }}：{{ server.info.collectWarning }}
+                            </div>
                         </template>
                         <div v-else class="ov-card-offline">
                             <i :class="server.status === 'nocred' ? 'el-icon-lock' : 'el-icon-warning-outline'"></i>
@@ -759,6 +762,24 @@ export default {
         }
     }
 }
+
+.ov-warning {
+    font-size: 11px;
+    color: #92400e;
+    background: #fffbeb;
+    border-radius: 6px;
+    padding: 6px 8px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-all;
+
+    i {
+        margin-right: 4px;
+    }
+}
+
 
 .ov-card-offline {
     display: flex;
